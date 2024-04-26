@@ -1,0 +1,18 @@
+{
+    "connector.class": "io.debezium.connector.sqlserver.SqlServerConnector",
+    "database.hostname": "testapx-db01.leithwheeler.com",
+    "database.server.name": "apxdb",
+    "database.port": "1433",
+    "database.user": "apxkafkaconnect",
+    "database.password": "C44vaLynrzFC2q9G",
+    "database.encrypt": true,
+    "database.trustServerCertificate": true,
+    "database.names": "APXFirm",
+    "table.include.list": "dbo.AdvPortfolio,dbo.AdvPortfolioTransaction,dbo.AoObject,dbo.AdvPortfolioBase,dbo.AdvPortfolioBaseExt,APX.PortfolioSetting,dbo.AdvCurrency,APX.PrivateEquity,APX.SecurityContact,APX.SecurityPropertyToday,APX.CreditRating,APX.DerivedSourceMap,APX.DividendRate,APX.SecurityAssetClassToday,dbo.AdvSecurity,dbo.AoPropertyLookup,dbo.AoProperty,dbo.AdvFixedIncome,dbo.AdvVRS,dbo.AdvSecurityProperty,APX.FxRateHistory",
+    "snapshot.mode": "schema_only",
+    "topic.prefix": "apxdb",
+    "database.history.kafka.bootstrap.servers": "poc-broker-1.leithwheeler.com:9092,poc-broker-2.leithwheeler.com:9092,poc-broker-3.leithwheeler.com:9092",
+    "database.history.kafka.topic": "apxdb.APXFirm.database.history" ,
+    "schema.history.internal.kafka.bootstrap.servers": "poc-broker-1.leithwheeler.com:9092,poc-broker-2.leithwheeler.com:9092,poc-broker-3.leithwheeler.com:9092",
+    "schema.history.internal.kafka.topic": "apxdb.APXFirm.schema.history" 
+}
