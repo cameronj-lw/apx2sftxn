@@ -5,6 +5,7 @@ import logging
 import pyodbc
 import os
 import socket
+import urllib.parse
 import weakref
 
 # pypi
@@ -29,13 +30,48 @@ DRIVERS = [
     'SQL Server Native Client 11.0',
     'SQL Server Native Client 10.0',
     'SQL Server',
-    'ODBC Driver 18 for SQL Server'
+    'ODBC Driver 18 for SQL Server',
 ]
 
 
 def get_app_name():
     base_app_name = os.environ.get('APP_NAME')
     return f'{base_app_name}_PID{os.getpid()}@{socket.gethostname()}'
+
+
+def get_pyodbc_conn(config_section):
+    """
+    Return a pyodbc connection object. This is useful when executing stored procedures or queries
+    that return multiple result sets
+
+    :param config_section: The config section containing config items
+    :returns: A pyodbc connection
+    """
+    # connect_str = get_connection_str(config_section)
+
+    host = AppConfig().get(config_section, 'host', fallback=None)
+    db = AppConfig().get(config_section, 'database', fallback=None)
+    username = AppConfig().get(config_section, 'username', fallback=None)
+    password = AppConfig().get(config_section, 'password', fallback=None)
+
+    # Get app name
+    app_name = get_app_name()
+    logging.debug(f'Setting DB connection app name to {app_name}')
+
+    # Prepare connection string
+    driver = select_driver()
+    driver = driver.replace('+', ' ')
+
+    connect_str = (
+        'DRIVER={0};'
+        'SERVER={1};'
+        'DATABASE={2};'
+        'APP={3};'
+        'TRUSTED_CONNECTION=Yes'
+    ).format(driver, host, db, app_name)
+
+    conn = pyodbc.connect(connect_str)
+    return conn
 
 
 def get_engine(config_section: str):
@@ -102,6 +138,47 @@ def get_engine(config_section: str):
         _DB_ENGINE_CACHE[key] = engine
 
     return _DB_ENGINE_CACHE[key]
+
+
+def get_connection_str(config_section: str):
+    """
+    Get connection string
+    """
+
+    # Get host & DB. Check if already in the cache.
+    host = AppConfig().get(config_section, 'host', fallback=None)
+    db = AppConfig().get(config_section, 'database', fallback=None)
+    username = AppConfig().get(config_section, 'username', fallback=None)
+    password = AppConfig().get(config_section, 'password', fallback=None)
+
+    # Get app name
+    app_name = get_app_name()
+    logging.debug(f'Setting DB connection app name to {app_name}')
+
+    # Prepare connection string
+    driver = select_driver()
+    if not driver:
+        raise RuntimeError('No SQL drivers found')
+
+    connection_str = MSSQL_CONN_STR.format(
+        host=host,
+        db=db,
+        driver=driver
+    )
+
+    # If username/password were in config, replace above conn str
+    if username is not None and password is not None:
+        encoded_password = urllib.parse.quote_plus(password)
+        connection_str = MSSQL_CONN_STR_WITH_USER.format(
+            host=host,
+            db=db,
+            driver=driver,
+            username=username,
+            password=password,
+            app_name=app_name
+        )
+
+    return connection_str
 
 
 def get_metadata(config_section: str):

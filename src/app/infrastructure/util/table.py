@@ -4,7 +4,7 @@ import logging
 import os
 import re
 import uuid
-from typing import Union, List
+from typing import Dict, Union, List
 
 # pypi
 import pandas as pd
@@ -93,15 +93,28 @@ class BaseTable(object):
         """
         return self._database.execute_write(sql_stmt, commit=commit)
 
-    def execute_read(self, sql_stmt):
+    def execute_insert(self, data: Dict, commit=None):
+        """
+        Syntactic sugar to aviod table.database.execute...
+
+        :param data: dict of single row to insert. Keys should match table columns.
+        :param commit: Whether to commit. If not provided, see database.py::execute_write
+        :returns: A sqlalchemy.engine.ResultProxy
+        """
+        stmt = sql.insert(self.table_def).values(**data)
+        return self.execute_write(stmt, commit=commit)
+
+    def execute_read(self, sql_stmt, nolock=True):
         """
         Syntactic sugar to aviod table.database.execute...
 
         :param sql_stmt: Statement to execute
+        :param nolock: Whether to use nolock (performance gain)
         :returns: Dataframe of results
         """
 
-        sql_stmt = sql_stmt.with_hint(self.table_def, text='WITH (NOLOCK)')
+        if nolock:
+            sql_stmt = sql_stmt.with_hint(self.table_def, text='WITH (NOLOCK)')
         return self._database.execute_read(sql_stmt)
 
     def read(self):
@@ -126,11 +139,11 @@ class BaseTable(object):
         # Filter df columns to columns which exist in the table, to avoid SQL error from inserting a column which DNE
         df = df[df.columns.intersection(self.c.keys())]
 
-        num_rows = df.shape[0]
-        res_rows = df.to_sql(self.table_name, self._database.engine, self.schema, if_exists='append', index=False)
-        if res_rows == num_rows:
-            logging.info('Insert done.')
-            return res_rows
+        # num_rows = df.shape[0]
+        # res_rows = df.to_sql(self.table_name, self._database.engine, self.schema, if_exists='append', index=False)
+        # if res_rows == num_rows:
+        #     logging.info('Insert done.')
+        #     return res_rows
 
         file_name = '{}.txt'.format(uuid.uuid4())
 

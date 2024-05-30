@@ -6,12 +6,14 @@ import datetime
 import logging
 import os
 import sys
+import threading
 import time
 import traceback
 from typing import Any, Dict, List, Type, Union
 
 # pypi
 from confluent_kafka import Consumer, OFFSET_BEGINNING, OFFSET_END
+from sqlalchemy import sql
 import pandas as pd
 
 # native
@@ -24,16 +26,21 @@ from domain.message_subscribers import MessageSubscriber
 from domain.models import Transaction, TransactionComment
 from domain.repositories import HeartbeatRepository
 
+from infrastructure.in_memory_repositories import APXDBvPortfolioInMemoryRepository
 from infrastructure.message_brokers import KafkaBroker
-from infrastructure.models import KafkaToStreamingDataColumnMapping, StreamingDataToRefresh, KafkaTopicStreamingDataRefresher
-from infrastructure.sql_procs import APXRepDBpAPXReadSecurityHashProc
+from infrastructure.models import (
+    KafkaToStreamingDataColumnMapping, StreamingDataToRefresh, KafkaTopicStreamingDataRefresher, 
+    InMemoryDataToRefresh, KafkaToInMemoryColumnMapping
+)
+from infrastructure.sql_procs import APXRepDBpAPXReadSecurityHashProc, APXDBTransactionActivityProcAndFunc
 from infrastructure.sql_tables import (
     APXDBvPortfolioView, APXDBvPortfolioBaseView, APXDBvPortfolioBaseCustomView,
     APXDBvPortfolioBaseSettingExView, APXDBvCurrencyView, APXDBvSecurityView,
-    APXDBvFXRateView
+    APXDBvFXRateView,
+    COREDBAPXfTransactionActivityQueueTable, COREDBAPXfTransactionActivityTable
 )
 from infrastructure.util.config import AppConfig
-from infrastructure.util.dataframe import delete_rows
+from infrastructure.util.dataframe import delete_rows, df_to_dict
 from infrastructure.util.logging import get_log_file_name
 
 
@@ -153,120 +160,41 @@ class KafkaMessageConsumer(MessageSubscriber):
 
 
 class KafkaAPXTransactionMessageConsumer(KafkaMessageConsumer):
-    # streaming_data_refreshers = [
-    #     KafkaTopicStreamingDataRefresher(topic=AppConfig().get('kafka_topics', 'apxdb_portfolio'), [
-    #         StreamingDataToRefresh(table_class=APXDBvPortfolioView, column_mapping=[KafkaToStreamingDataColumnMapping('PortfolioID')]),
-    #         StreamingDataToRefresh(table_class=APXDBvPortfolioBaseView, column_mapping=[KafkaToStreamingDataColumnMapping('PortfolioBaseID', 'PortfolioID')]),
-    #         StreamingDataToRefresh(table_class=APXDBvPortfolioBaseCustomView, column_mapping=[KafkaToStreamingDataColumnMapping('PortfolioBaseID', 'PortfolioID')]),
-    #         StreamingDataToRefresh(table_class=APXDBvPortfolioBaseSettingExView, column_mapping=[KafkaToStreamingDataColumnMapping('PortfolioBaseID', 'PortfolioID')]),
-    #     ]),
-    #     KafkaTopicStreamingDataRefresher(topic=AppConfig().get('kafka_topics', 'apxdb_aoobject'), [
-    #         StreamingDataToRefresh(table_class=APXDBvPortfolioView, column_mapping=[KafkaToStreamingDataColumnMapping('ObjectID', 'PortfolioID')]),
-    #         StreamingDataToRefresh(table_class=APXDBvPortfolioBaseView, column_mapping=[KafkaToStreamingDataColumnMapping('ObjectID', 'PortfolioBaseID')]),
-    #         StreamingDataToRefresh(table_class=APXDBvPortfolioBaseCustomView, column_mapping=[KafkaToStreamingDataColumnMapping('ObjectID', 'PortfolioBaseID')]),
-    #         StreamingDataToRefresh(table_class=APXDBvPortfolioBaseSettingExView, column_mapping=[KafkaToStreamingDataColumnMapping('ObjectID', 'PortfolioBaseID')]),
-    #     ]),
-    #     KafkaTopicStreamingDataRefresher(topic=AppConfig().get('kafka_topics', 'apxdb_portfoliobase'), [
-    #         StreamingDataToRefresh(table_class=APXDBvPortfolioBaseView, column_mapping=[KafkaToStreamingDataColumnMapping('PortfolioBaseID')]),
-    #         StreamingDataToRefresh(table_class=APXDBvPortfolioBaseSettingExView, column_mapping=[KafkaToStreamingDataColumnMapping('PortfolioBaseID')]),
-    #     ]),
-    #     KafkaTopicStreamingDataRefresher(topic=AppConfig().get('kafka_topics', 'apxdb_portfoliobaseext'), [
-    #         StreamingDataToRefresh(table_class=APXDBvPortfolioBaseCustomView, column_mapping=[KafkaToStreamingDataColumnMapping('PortfolioBaseID')]),
-    #     ]),
-    #     KafkaTopicStreamingDataRefresher(topic=AppConfig().get('kafka_topics', 'apxdb_portfoliosetting'), [
-    #         StreamingDataToRefresh(table_class=APXDBvPortfolioBaseSettingExView, column_mapping=[KafkaToStreamingDataColumnMapping('PortfolioSettingID', 'PortfolioBaseID')]),
-    #     ]),
-    #     KafkaTopicStreamingDataRefresher(topic=AppConfig().get('kafka_topics', 'apxdb_currency'), [
-    #         StreamingDataToRefresh(table_class=APXDBvCurrencyView, column_mapping=[KafkaToStreamingDataColumnMapping('CurrencyCode')]),
-    #         StreamingDataToRefresh(table_class=APXRepDBpAPXReadSecurityHashProc, column_mapping=[]),  # TODO: optimize this? Need currency param for stored proc?
-    #     ]),
-    #     KafkaTopicStreamingDataRefresher(topic=AppConfig().get('kafka_topics', 'apxdb_privateequity'), [
-    #         StreamingDataToRefresh(table_class=APXDBvSecurityView, column_mapping=[KafkaToStreamingDataColumnMapping('SecurityID')]),
-    #         StreamingDataToRefresh(table_class=APXRepDBpAPXReadSecurityHashProc, column_mapping=[KafkaToStreamingDataColumnMapping('SecurityID')]),
-    #     ]),
-    #     KafkaTopicStreamingDataRefresher(topic=AppConfig().get('kafka_topics', 'apxdb_securitycontact'), [
-    #         StreamingDataToRefresh(table_class=APXDBvSecurityView, column_mapping=[KafkaToStreamingDataColumnMapping('SecurityID')]),
-    #         StreamingDataToRefresh(table_class=APXRepDBpAPXReadSecurityHashProc, column_mapping=[KafkaToStreamingDataColumnMapping('SecurityID')]),
-    #     ]),
-    #     KafkaTopicStreamingDataRefresher(topic=AppConfig().get('kafka_topics', 'apxdb_securitypropertytoday'), [
-    #         StreamingDataToRefresh(table_class=APXDBvSecurityView, column_mapping=[KafkaToStreamingDataColumnMapping('SecurityID')]),
-    #         StreamingDataToRefresh(table_class=APXRepDBpAPXReadSecurityHashProc, column_mapping=[KafkaToStreamingDataColumnMapping('SecurityID')]),
-    #     ]),
-    #     KafkaTopicStreamingDataRefresher(topic=AppConfig().get('kafka_topics', 'apxdb_creditrating'), [
-    #         StreamingDataToRefresh(table_class=APXDBvSecurityView, column_mapping=[KafkaToStreamingDataColumnMapping('SecurityID')]),
-    #         StreamingDataToRefresh(table_class=APXRepDBpAPXReadSecurityHashProc, column_mapping=[KafkaToStreamingDataColumnMapping('SecurityID')]),
-    #     ]),
-    #     KafkaTopicStreamingDataRefresher(topic=AppConfig().get('kafka_topics', 'apxdb_derivedsourcemap'), [
-    #         StreamingDataToRefresh(table_class=APXDBvSecurityView, column_mapping=[KafkaToStreamingDataColumnMapping('SourceLookupID', 'IndustryGroupLookupID')], filter_criteria={'DerivedPropertyID': [-6]}),
-    #         # TODO: do we need to also refresh APXRepDBpAPXReadSecurityHashProc?
-    #     ]),
-    #     KafkaTopicStreamingDataRefresher(topic=AppConfig().get('kafka_topics', 'apxdb_dividendrate'), [
-    #         StreamingDataToRefresh(table_class=APXDBvSecurityView, column_mapping=[KafkaToStreamingDataColumnMapping('SecurityID')]),
-    #         StreamingDataToRefresh(table_class=APXRepDBpAPXReadSecurityHashProc, column_mapping=[KafkaToStreamingDataColumnMapping('SecurityID')]),
-    #     ]),
-    #     KafkaTopicStreamingDataRefresher(topic=AppConfig().get('kafka_topics', 'apxdb_securityassetclasstoday'), [
-    #         StreamingDataToRefresh(table_class=APXDBvSecurityView, column_mapping=[KafkaToStreamingDataColumnMapping('SecurityID')]),
-    #         StreamingDataToRefresh(table_class=APXRepDBpAPXReadSecurityHashProc, column_mapping=[KafkaToStreamingDataColumnMapping('SecurityID')]),
-    #     ]),
-    #     KafkaTopicStreamingDataRefresher(topic=AppConfig().get('kafka_topics', 'apxdb_securitypropertytoday'), [
-    #         StreamingDataToRefresh(table_class=APXDBvSecurityView, column_mapping=[KafkaToStreamingDataColumnMapping('SecurityID')], filter_criteria={'PropertyID': [-7, -21, -22, -23]}),
-    #         StreamingDataToRefresh(table_class=APXRepDBpAPXReadSecurityHashProc, column_mapping=[KafkaToStreamingDataColumnMapping('SecurityID')], filter_criteria={'PropertyID': [-7, -21, -22, -23]}),
-    #     ]),
-    #     KafkaTopicStreamingDataRefresher(topic=AppConfig().get('kafka_topics', 'apxdb_security'), [
-    #         StreamingDataToRefresh(table_class=APXDBvSecurityView, column_mapping=[KafkaToStreamingDataColumnMapping('SecurityID')]),
-    #         StreamingDataToRefresh(table_class=APXRepDBpAPXReadSecurityHashProc, column_mapping=[KafkaToStreamingDataColumnMapping('SecurityID')]),
-    #     ]),
-    #     KafkaTopicStreamingDataRefresher(topic=AppConfig().get('kafka_topics', 'apxdb_aopropertylookup'), [
-    #         StreamingDataToRefresh(table_class=APXDBvSecurityView, column_mapping=[]),  # TODO: optimize this, rather than full view refresh every time?
-    #         StreamingDataToRefresh(table_class=APXRepDBpAPXReadSecurityHashProc, column_mapping=[]),  # TODO: optimize this, rather than full view refresh every time?
-    #     ]),
-    #     KafkaTopicStreamingDataRefresher(topic=AppConfig().get('kafka_topics', 'apxdb_aoproperty'), [
-    #         StreamingDataToRefresh(table_class=APXDBvSecurityView, column_mapping=[], filter_criteria={'PropertyName': 'Today'}),
-    #         StreamingDataToRefresh(table_class=APXRepDBpAPXReadSecurityHashProc, column_mapping=[], filter_criteria={'PropertyName': 'Today'}),
-    #     ]),
-    #     KafkaTopicStreamingDataRefresher(topic=AppConfig().get('kafka_topics', 'apxdb_fixedincome'), [
-    #         StreamingDataToRefresh(table_class=APXDBvSecurityView, column_mapping=[KafkaToStreamingDataColumnMapping('SecurityID')]),
-    #         StreamingDataToRefresh(table_class=APXRepDBpAPXReadSecurityHashProc, column_mapping=[KafkaToStreamingDataColumnMapping('SecurityID')]),
-    #     ]),
-    #     KafkaTopicStreamingDataRefresher(topic=AppConfig().get('kafka_topics', 'apxdb_vrs'), [
-    #         StreamingDataToRefresh(table_class=APXDBvSecurityView, column_mapping=[KafkaToStreamingDataColumnMapping('SecurityID')]),
-    #         StreamingDataToRefresh(table_class=APXRepDBpAPXReadSecurityHashProc, column_mapping=[KafkaToStreamingDataColumnMapping('SecurityID')]),
-    #     ]),
-    #     KafkaTopicStreamingDataRefresher(topic=AppConfig().get('kafka_topics', 'apxdb_securityproperty'), [
-    #         StreamingDataToRefresh(table_class=APXRepDBpAPXReadSecurityHashProc, column_mapping=[KafkaToStreamingDataColumnMapping('SecurityID')]),
-    #     ]),
-    #     KafkaTopicStreamingDataRefresher(topic=AppConfig().get('kafka_topics', 'apxdb_fxratehistory'), [
-    #         StreamingDataToRefresh(table_class=APXDBvFXRateView, column_mapping=[KafkaToStreamingDataColumnMapping('NumeratorCurrCode'), KafkaToStreamingDataColumnMapping('DenominatorCurrCode'), KafkaToStreamingDataColumnMapping('AsOfDate')]),
-    #     ]),
-    # ]
-
+    in_memory_repo_refreshers = {
+        AppConfig().get('kafka_topics', 'apxdb_portfolio'): [
+            InMemoryDataToRefresh(repo_class=APXDBvPortfolioInMemoryRepository, column_mapping=[KafkaToInMemoryColumnMapping('PortfolioID')]),
+            # StreamingDataToRefresh(table_class=APXDBvPortfolioBaseView, column_mapping=[KafkaToStreamingDataColumnMapping('PortfolioID', 'PortfolioBaseID')]),
+            # StreamingDataToRefresh(table_class=APXDBvPortfolioBaseCustomView, column_mapping=[KafkaToStreamingDataColumnMapping('PortfolioID', 'PortfolioBaseID')]),
+            # StreamingDataToRefresh(table_class=APXDBvPortfolioBaseSettingExView, column_mapping=[KafkaToStreamingDataColumnMapping('PortfolioID', 'PortfolioBaseID')]),
+        ],
+    }
     streaming_data_refreshers = {
         AppConfig().get('kafka_topics', 'apxdb_portfolio'): [
             StreamingDataToRefresh(table_class=APXDBvPortfolioView, column_mapping=[KafkaToStreamingDataColumnMapping('PortfolioID')]),
-            StreamingDataToRefresh(table_class=APXDBvPortfolioBaseView, column_mapping=[KafkaToStreamingDataColumnMapping('PortfolioID', 'PortfolioBaseID')]),
-            StreamingDataToRefresh(table_class=APXDBvPortfolioBaseCustomView, column_mapping=[KafkaToStreamingDataColumnMapping('PortfolioID', 'PortfolioBaseID')]),
-            StreamingDataToRefresh(table_class=APXDBvPortfolioBaseSettingExView, column_mapping=[KafkaToStreamingDataColumnMapping('PortfolioID', 'PortfolioBaseID')]),
+            # StreamingDataToRefresh(table_class=APXDBvPortfolioBaseView, column_mapping=[KafkaToStreamingDataColumnMapping('PortfolioID', 'PortfolioBaseID')]),
+            # StreamingDataToRefresh(table_class=APXDBvPortfolioBaseCustomView, column_mapping=[KafkaToStreamingDataColumnMapping('PortfolioID', 'PortfolioBaseID')]),
+            # StreamingDataToRefresh(table_class=APXDBvPortfolioBaseSettingExView, column_mapping=[KafkaToStreamingDataColumnMapping('PortfolioID', 'PortfolioBaseID')]),
         ],
-        AppConfig().get('kafka_topics', 'apxdb_aoobject'): [
-            StreamingDataToRefresh(table_class=APXDBvPortfolioView, column_mapping=[KafkaToStreamingDataColumnMapping('ObjectID', 'PortfolioID')]),
-            StreamingDataToRefresh(table_class=APXDBvPortfolioBaseView, column_mapping=[KafkaToStreamingDataColumnMapping('ObjectID', 'PortfolioBaseID')]),
-            StreamingDataToRefresh(table_class=APXDBvPortfolioBaseCustomView, column_mapping=[KafkaToStreamingDataColumnMapping('ObjectID', 'PortfolioBaseID')]),
-            StreamingDataToRefresh(table_class=APXDBvPortfolioBaseSettingExView, column_mapping=[KafkaToStreamingDataColumnMapping('ObjectID', 'PortfolioBaseID')]),
-        ],
-        AppConfig().get('kafka_topics', 'apxdb_portfoliobase'): [
-            StreamingDataToRefresh(table_class=APXDBvPortfolioBaseView, column_mapping=[KafkaToStreamingDataColumnMapping('PortfolioBaseID')]),
-            StreamingDataToRefresh(table_class=APXDBvPortfolioBaseSettingExView, column_mapping=[KafkaToStreamingDataColumnMapping('PortfolioBaseID')]),
-        ],
-        AppConfig().get('kafka_topics', 'apxdb_portfoliobaseext'): [
-            StreamingDataToRefresh(table_class=APXDBvPortfolioBaseCustomView, column_mapping=[KafkaToStreamingDataColumnMapping('PortfolioBaseID')]),
-        ],
-        AppConfig().get('kafka_topics', 'apxdb_portfoliosetting'): [
-            StreamingDataToRefresh(table_class=APXDBvPortfolioBaseSettingExView, column_mapping=[KafkaToStreamingDataColumnMapping('PortfolioSettingID', 'PortfolioBaseID')]),
-        ],
-        AppConfig().get('kafka_topics', 'apxdb_currency'): [
-            StreamingDataToRefresh(table_class=APXDBvCurrencyView, column_mapping=[KafkaToStreamingDataColumnMapping('CurrencyCode')]),
-            StreamingDataToRefresh(table_class=APXRepDBpAPXReadSecurityHashProc, column_mapping=[]),  # TODO: optimize this? Need currency param for stored proc?
-        ],
+        # AppConfig().get('kafka_topics', 'apxdb_aoobject'): [
+        #     StreamingDataToRefresh(table_class=APXDBvPortfolioView, column_mapping=[KafkaToStreamingDataColumnMapping('ObjectID', 'PortfolioID')]),
+        #     StreamingDataToRefresh(table_class=APXDBvPortfolioBaseView, column_mapping=[KafkaToStreamingDataColumnMapping('ObjectID', 'PortfolioBaseID')]),
+        #     StreamingDataToRefresh(table_class=APXDBvPortfolioBaseCustomView, column_mapping=[KafkaToStreamingDataColumnMapping('ObjectID', 'PortfolioBaseID')]),
+        #     StreamingDataToRefresh(table_class=APXDBvPortfolioBaseSettingExView, column_mapping=[KafkaToStreamingDataColumnMapping('ObjectID', 'PortfolioBaseID')]),
+        # ],
+        # AppConfig().get('kafka_topics', 'apxdb_portfoliobase'): [
+        #     StreamingDataToRefresh(table_class=APXDBvPortfolioBaseView, column_mapping=[KafkaToStreamingDataColumnMapping('PortfolioBaseID')]),
+        #     StreamingDataToRefresh(table_class=APXDBvPortfolioBaseSettingExView, column_mapping=[KafkaToStreamingDataColumnMapping('PortfolioBaseID')]),
+        # ],
+        # AppConfig().get('kafka_topics', 'apxdb_portfoliobaseext'): [
+        #     StreamingDataToRefresh(table_class=APXDBvPortfolioBaseCustomView, column_mapping=[KafkaToStreamingDataColumnMapping('PortfolioBaseID')]),
+        # ],
+        # AppConfig().get('kafka_topics', 'apxdb_portfoliosetting'): [
+        #     StreamingDataToRefresh(table_class=APXDBvPortfolioBaseSettingExView, column_mapping=[KafkaToStreamingDataColumnMapping('PortfolioSettingID', 'PortfolioBaseID')]),
+        # ],
+        # AppConfig().get('kafka_topics', 'apxdb_currency'): [
+        #     StreamingDataToRefresh(table_class=APXDBvCurrencyView, column_mapping=[KafkaToStreamingDataColumnMapping('CurrencyCode')]),
+        #     StreamingDataToRefresh(table_class=APXRepDBpAPXReadSecurityHashProc, column_mapping=[]),  # TODO: optimize this? Need currency param for stored proc?
+        # ],
         # AppConfig().get('kafka_topics', 'apxdb_privateequity'): [
         #     StreamingDataToRefresh(table_class=APXDBvSecurityView, column_mapping=[KafkaToStreamingDataColumnMapping('SecurityID')]),
         #     StreamingDataToRefresh(table_class=APXRepDBpAPXReadSecurityHashProc, column_mapping=[KafkaToStreamingDataColumnMapping('SecurityID')]),
@@ -275,53 +203,53 @@ class KafkaAPXTransactionMessageConsumer(KafkaMessageConsumer):
         #     StreamingDataToRefresh(table_class=APXDBvSecurityView, column_mapping=[KafkaToStreamingDataColumnMapping('SecurityID')]),
         #     StreamingDataToRefresh(table_class=APXRepDBpAPXReadSecurityHashProc, column_mapping=[KafkaToStreamingDataColumnMapping('SecurityID')]),
         # ],
-        AppConfig().get('kafka_topics', 'apxdb_securitypropertytoday'): [
-            StreamingDataToRefresh(table_class=APXDBvSecurityView, column_mapping=[KafkaToStreamingDataColumnMapping('SecurityID')]),
-            StreamingDataToRefresh(table_class=APXRepDBpAPXReadSecurityHashProc, column_mapping=[KafkaToStreamingDataColumnMapping('SecurityID')]),
-        ],
-        AppConfig().get('kafka_topics', 'apxdb_creditrating'): [
-            StreamingDataToRefresh(table_class=APXDBvSecurityView, column_mapping=[KafkaToStreamingDataColumnMapping('SecurityID')]),
-            StreamingDataToRefresh(table_class=APXRepDBpAPXReadSecurityHashProc, column_mapping=[KafkaToStreamingDataColumnMapping('SecurityID')]),
-        ],
-        AppConfig().get('kafka_topics', 'apxdb_derivedsourcemap'): [
-            StreamingDataToRefresh(table_class=APXDBvSecurityView, column_mapping=[KafkaToStreamingDataColumnMapping('SourceLookupID', 'IndustryGroupID')], filter_criteria={'DerivedPropertyID': [-6]}),
-            # TODO: do we need to also refresh APXRepDBpAPXReadSecurityHashProc?
-        ],
-        AppConfig().get('kafka_topics', 'apxdb_dividendrate'): [
-            StreamingDataToRefresh(table_class=APXDBvSecurityView, column_mapping=[KafkaToStreamingDataColumnMapping('SecurityID')]),
-            StreamingDataToRefresh(table_class=APXRepDBpAPXReadSecurityHashProc, column_mapping=[KafkaToStreamingDataColumnMapping('SecurityID')]),
-        ],
-        AppConfig().get('kafka_topics', 'apxdb_securityassetclasstoday'): [
-            StreamingDataToRefresh(table_class=APXDBvSecurityView, column_mapping=[KafkaToStreamingDataColumnMapping('SecurityID')]),
-            StreamingDataToRefresh(table_class=APXRepDBpAPXReadSecurityHashProc, column_mapping=[KafkaToStreamingDataColumnMapping('SecurityID')]),
-        ],
-        AppConfig().get('kafka_topics', 'apxdb_securitypropertytoday'): [
-            StreamingDataToRefresh(table_class=APXDBvSecurityView, column_mapping=[KafkaToStreamingDataColumnMapping('SecurityID')], filter_criteria={'PropertyID': [-7, -21, -22, -23]}),
-            StreamingDataToRefresh(table_class=APXRepDBpAPXReadSecurityHashProc, column_mapping=[KafkaToStreamingDataColumnMapping('SecurityID')], filter_criteria={'PropertyID': [-7, -21, -22, -23]}),
-        ],
-        AppConfig().get('kafka_topics', 'apxdb_security'): [
-            StreamingDataToRefresh(table_class=APXDBvSecurityView, column_mapping=[KafkaToStreamingDataColumnMapping('SecurityID')]),
-            StreamingDataToRefresh(table_class=APXRepDBpAPXReadSecurityHashProc, column_mapping=[KafkaToStreamingDataColumnMapping('SecurityID')]),
-        ],
-        AppConfig().get('kafka_topics', 'apxdb_aopropertylookup'): [
-            StreamingDataToRefresh(table_class=APXDBvSecurityView, column_mapping=[]),  # TODO: optimize this, rather than full view refresh every time?
-            StreamingDataToRefresh(table_class=APXRepDBpAPXReadSecurityHashProc, column_mapping=[]),  # TODO: optimize this, rather than full view refresh every time?
-        ],
-        AppConfig().get('kafka_topics', 'apxdb_aoproperty'): [
-            StreamingDataToRefresh(table_class=APXDBvSecurityView, column_mapping=[], filter_criteria={'PropertyName': 'Today'}),
-            StreamingDataToRefresh(table_class=APXRepDBpAPXReadSecurityHashProc, column_mapping=[], filter_criteria={'PropertyName': 'Today'}),
-        ],
-        AppConfig().get('kafka_topics', 'apxdb_fixedincome'): [
-            StreamingDataToRefresh(table_class=APXDBvSecurityView, column_mapping=[KafkaToStreamingDataColumnMapping('SecurityID')]),
-            StreamingDataToRefresh(table_class=APXRepDBpAPXReadSecurityHashProc, column_mapping=[KafkaToStreamingDataColumnMapping('SecurityID')]),
-        ],
-        AppConfig().get('kafka_topics', 'apxdb_vrs'): [
-            StreamingDataToRefresh(table_class=APXDBvSecurityView, column_mapping=[KafkaToStreamingDataColumnMapping('SecurityID')]),
-            StreamingDataToRefresh(table_class=APXRepDBpAPXReadSecurityHashProc, column_mapping=[KafkaToStreamingDataColumnMapping('SecurityID')]),
-        ],
-        AppConfig().get('kafka_topics', 'apxdb_securityproperty'): [
-            StreamingDataToRefresh(table_class=APXRepDBpAPXReadSecurityHashProc, column_mapping=[KafkaToStreamingDataColumnMapping('SecurityID')]),
-        ],
+        # AppConfig().get('kafka_topics', 'apxdb_securitypropertytoday'): [
+        #     StreamingDataToRefresh(table_class=APXDBvSecurityView, column_mapping=[KafkaToStreamingDataColumnMapping('SecurityID')]),
+        #     StreamingDataToRefresh(table_class=APXRepDBpAPXReadSecurityHashProc, column_mapping=[KafkaToStreamingDataColumnMapping('SecurityID')]),
+        # ],
+        # AppConfig().get('kafka_topics', 'apxdb_creditrating'): [
+        #     StreamingDataToRefresh(table_class=APXDBvSecurityView, column_mapping=[KafkaToStreamingDataColumnMapping('SecurityID')]),
+        #     StreamingDataToRefresh(table_class=APXRepDBpAPXReadSecurityHashProc, column_mapping=[KafkaToStreamingDataColumnMapping('SecurityID')]),
+        # ],
+        # AppConfig().get('kafka_topics', 'apxdb_derivedsourcemap'): [
+        #     StreamingDataToRefresh(table_class=APXDBvSecurityView, column_mapping=[KafkaToStreamingDataColumnMapping('SourceLookupID', 'IndustryGroupID')], filter_criteria={'DerivedPropertyID': [-6]}),
+        #     # TODO: do we need to also refresh APXRepDBpAPXReadSecurityHashProc?
+        # ],
+        # AppConfig().get('kafka_topics', 'apxdb_dividendrate'): [
+        #     StreamingDataToRefresh(table_class=APXDBvSecurityView, column_mapping=[KafkaToStreamingDataColumnMapping('SecurityID')]),
+        #     StreamingDataToRefresh(table_class=APXRepDBpAPXReadSecurityHashProc, column_mapping=[KafkaToStreamingDataColumnMapping('SecurityID')]),
+        # ],
+        # AppConfig().get('kafka_topics', 'apxdb_securityassetclasstoday'): [
+        #     StreamingDataToRefresh(table_class=APXDBvSecurityView, column_mapping=[KafkaToStreamingDataColumnMapping('SecurityID')]),
+        #     StreamingDataToRefresh(table_class=APXRepDBpAPXReadSecurityHashProc, column_mapping=[KafkaToStreamingDataColumnMapping('SecurityID')]),
+        # ],
+        # AppConfig().get('kafka_topics', 'apxdb_securitypropertytoday'): [
+        #     StreamingDataToRefresh(table_class=APXDBvSecurityView, column_mapping=[KafkaToStreamingDataColumnMapping('SecurityID')], filter_criteria={'PropertyID': [-7, -21, -22, -23]}),
+        #     StreamingDataToRefresh(table_class=APXRepDBpAPXReadSecurityHashProc, column_mapping=[KafkaToStreamingDataColumnMapping('SecurityID')], filter_criteria={'PropertyID': [-7, -21, -22, -23]}),
+        # ],
+        # AppConfig().get('kafka_topics', 'apxdb_security'): [
+        #     StreamingDataToRefresh(table_class=APXDBvSecurityView, column_mapping=[KafkaToStreamingDataColumnMapping('SecurityID')]),
+        #     StreamingDataToRefresh(table_class=APXRepDBpAPXReadSecurityHashProc, column_mapping=[KafkaToStreamingDataColumnMapping('SecurityID')]),
+        # ],
+        # AppConfig().get('kafka_topics', 'apxdb_aopropertylookup'): [
+        #     StreamingDataToRefresh(table_class=APXDBvSecurityView, column_mapping=[]),  # TODO: optimize this, rather than full view refresh every time?
+        #     StreamingDataToRefresh(table_class=APXRepDBpAPXReadSecurityHashProc, column_mapping=[]),  # TODO: optimize this, rather than full view refresh every time?
+        # ],
+        # AppConfig().get('kafka_topics', 'apxdb_aoproperty'): [
+        #     StreamingDataToRefresh(table_class=APXDBvSecurityView, column_mapping=[], filter_criteria={'PropertyName': 'Today'}),
+        #     StreamingDataToRefresh(table_class=APXRepDBpAPXReadSecurityHashProc, column_mapping=[], filter_criteria={'PropertyName': 'Today'}),
+        # ],
+        # AppConfig().get('kafka_topics', 'apxdb_fixedincome'): [
+        #     StreamingDataToRefresh(table_class=APXDBvSecurityView, column_mapping=[KafkaToStreamingDataColumnMapping('SecurityID')]),
+        #     StreamingDataToRefresh(table_class=APXRepDBpAPXReadSecurityHashProc, column_mapping=[KafkaToStreamingDataColumnMapping('SecurityID')]),
+        # ],
+        # AppConfig().get('kafka_topics', 'apxdb_vrs'): [
+        #     StreamingDataToRefresh(table_class=APXDBvSecurityView, column_mapping=[KafkaToStreamingDataColumnMapping('SecurityID')]),
+        #     StreamingDataToRefresh(table_class=APXRepDBpAPXReadSecurityHashProc, column_mapping=[KafkaToStreamingDataColumnMapping('SecurityID')]),
+        # ],
+        # AppConfig().get('kafka_topics', 'apxdb_securityproperty'): [
+        #     StreamingDataToRefresh(table_class=APXRepDBpAPXReadSecurityHashProc, column_mapping=[KafkaToStreamingDataColumnMapping('SecurityID')]),
+        # ],
         # AppConfig().get('kafka_topics', 'apxdb_fxratehistory'): [
         #     StreamingDataToRefresh(table_class=APXDBvFXRateView, column_mapping=[KafkaToStreamingDataColumnMapping('NumeratorCurrCode'), KafkaToStreamingDataColumnMapping('DenominatorCurrCode'), KafkaToStreamingDataColumnMapping('AsOfDate')]),
         # ],
@@ -330,35 +258,135 @@ class KafkaAPXTransactionMessageConsumer(KafkaMessageConsumer):
     def __init__(self, event_handler: EventHandler, heartbeat_repo: Union[HeartbeatRepository,None]=None):
         """ Creates a KafkaMessageConsumer to consume new/changed apxdb transactions/comments with the provided event handler """
         super().__init__(event_handler=event_handler, heartbeat_repo=heartbeat_repo, topics=[AppConfig().get('kafka_topics', 'apxdb_transaction')])
+        self.streaming_data_topics = list(self.in_memory_repo_refreshers.keys())
 
         # Initialize streaming data
-        self.init_streaming_data()
+        # self.init_streaming_data()
 
-    def init_streaming_data(self):
-        self.streaming_data = {}
-        self.streaming_data_topics = []
+        # Initialize timers
+        # self.init_timers()
+
+    # def init_streaming_data_old(self):
+    #     self.streaming_data = {}
+    #     self.streaming_data_topics = []
         
-        # Find all BaseTables which need to be queried in order to be initialized
-        # Also find all topics to consume from for streaming data
-        base_table_classes = []
-        for k, v in self.streaming_data_refreshers.items():
-            self.streaming_data_topics.append(k)
-            for data_to_refresh in v:
-                base_table_classes.append(data_to_refresh.table_class)
+    #     # Find all BaseTables which need to be queried in order to be initialized
+    #     # Also find all topics to consume from for streaming data
+    #     base_table_classes = []
+    #     for k, v in self.streaming_data_refreshers.items():
+    #         self.streaming_data_topics.append(k)
+    #         for data_to_refresh in v:
+    #             base_table_classes.append(data_to_refresh.table_class)
 
-        # Now loop through them and initialize by reading all.
-        # By the end, self.streaming_data is a dict where the keys are table classes and values are pd df's
-        for table_class in list(set(base_table_classes)):
-            logging.info(f'Starting initial read of {table_class.__name__}...')
-            self.streaming_data[table_class] = table_class().read()
+    #     # Now loop through them and initialize by reading all.
+    #     # By the end, self.streaming_data is a dict where the keys are table classes and values are pd df's
+    #     for table_class in list(set(base_table_classes)):
+    #         logging.info(f'Starting initial read of {table_class.__name__}...')
+    #         df = (tbl := table_class()).read()
+    #         if hasattr(tbl, 'pk_column_name'):
+    #             self.streaming_data[table_class] = df_to_dict(df, [tbl.pk_column_name])
+
+    def init_timers(self):
+        def apx_transaction_engine():
+            queue_tbl = COREDBAPXfTransactionActivityQueueTable()
+            proc_and_func = APXDBTransactionActivityProcAndFunc()
+            results_tbl = COREDBAPXfTransactionActivityTable()
+
+
+            # 1. Check for "PENDING" status items in queue tables
+            pending_df = queue_tbl.read(queue_status='PENDING')
+
+
+            # Loop through Portfolios & Trade Dates {
+            for i, row in pending_df.iterrows():
+
+                # 2. Update queue table status to "IN_PROGRESS"
+                logging.info(f"Found PENDING: {row['portfolio_code']} {row['from_date']} {row['to_date']}")
+                queue_tbl.upsert(pk_column_name=['portfolio_code', 'from_date', 'to_date'], data={
+                    'portfolio_code': row['portfolio_code'],
+                    'from_date'     : row['from_date'],
+                    'to_date'       : row['to_date'],
+                    'queue_status'  : 'IN_PROGRESS',
+                    'modified_by'   : 'apx_transaction_engine',
+                    'modified_at'   : datetime.datetime.now()
+                })
+
+
+                # 3. Run APX SP & SF
+                logging.info(f"Running APX SP & SF for: {row['portfolio_code']} {row['from_date']} {row['to_date']}")
+                res = proc_and_func.read(
+                    Portfolios=row['portfolio_code'],
+                    FromDate=row['from_date'],
+                    ToDate=row['to_date'],
+                )
+
+
+                # 4. Save to actual table
+
+                # 4a. Delete previous rows for date range
+                logging.info(f"Deleting previous results for: {row['portfolio_code']} {row['from_date']} {row['to_date']}")
+                stmt = sql.delete(results_tbl.table_def)
+                stmt = stmt.where(results_tbl.c.PortfolioBaseID == row['portfolio_id'])
+                stmt = stmt.where(results_tbl.c.TradeDate >= row['from_date'])
+                stmt = stmt.where(results_tbl.c.TradeDate <= row['to_date'])
+                delete_res = results_tbl.execute_write(stmt)
+
+                # TODO_EH: what if delete fails?
+
+                # 4b. Save new rows for date range
+                logging.info(f"Saving results for: {row['portfolio_code']} {row['from_date']} {row['to_date']}")
+                res['modified_by'] = 'apx_transaction_engine'
+                res['modified_at'] = datetime.datetime.now()
+                bulk_insert_res = results_tbl.bulk_insert(res)
+
+                # TODO_EH: what if bulk insert fails?
+
+
+                # 5. Update to "SUCCESS" (TODO_EH: what if something fails?)
+                logging.info(f"Saving queue_status as SUCCESS for: {row['portfolio_code']} {row['from_date']} {row['to_date']}")
+                queue_tbl.upsert(pk_column_name=['portfolio_code', 'from_date', 'to_date'], data={
+                    'portfolio_code': row['portfolio_code'],
+                    'from_date'     : row['from_date'],
+                    'to_date'       : row['to_date'],
+                    'queue_status'  : 'SUCCESS',
+                    'modified_by'   : 'apx_transaction_engine',
+                    'modified_at'   : datetime.datetime.now()
+                })
+
+
+                # 6. Transform into "LW Txn Summary" format?
+
+
+                # 7. Save to "LW Txn Summary" table?
+
+
+                # 8. Transform into SF Txn format
+
+
+                # 9. Save to SF Txn table
+            
+
+            # }
+
+        wait_sec = AppConfig().get('apx_transaction_engine', 'wait_sec', fallback=10)
+        transaction_engine_timer = threading.Timer(wait_sec, apx_transaction_engine)
+        transaction_engine_timer.start()
+        
+        def apx_realized_engine():
+            pass
+        wait_sec = AppConfig().get('apx_realized_engine', 'wait_sec', fallback=10)
+        realized_engine_timer = threading.Timer(wait_sec, apx_realized_engine)
+        realized_engine_timer.start()
 
     def consume(self, reset_offset: bool=False):
         
         logging.info(f'Consuming from topics: {self.topics}')
         logging.info(f'Also consuming from data streaming topics: {self.streaming_data_topics}')
+        # logging.info(f'Also consuming from data streaming topics: {self.in_memory_repo_refreshers.keys()}')
 
         self.reset_offset = reset_offset
         self.consumer.subscribe(self.topics + self.streaming_data_topics, on_assign=self.on_assign)
+        # self.consumer.subscribe(self.topics + list(self.in_memory_repo_refreshers.keys()), on_assign=self.on_assign)
 
         try:
             sleep_secs = int(AppConfig().get('kafka_consumer_lw', 'sleep_seconds', fallback=5))
@@ -400,7 +428,7 @@ class KafkaAPXTransactionMessageConsumer(KafkaMessageConsumer):
                             data = self.deserialize_streaming_data(msg.value())
 
                             # Now loop through each StreamingDataToRefresh and refresh accordingly:
-                            for r in self.streaming_data_refreshers[msg.topic()]:
+                            for r in self.in_memory_repo_refreshers[msg.topic()]:
                                 # Check if filter criteria are met
                                 for k, v in r.filter_criteria.items():
                                     if data.get(k) not in v:
@@ -413,29 +441,13 @@ class KafkaAPXTransactionMessageConsumer(KafkaMessageConsumer):
                                 params = {}
                                 for cm in r.column_mapping:
                                     if cm.kafka_msg_column_name in data:
-                                        params[cm.streaming_data_column_name] = data[cm.kafka_msg_column_name]
+                                        params[cm.in_memory_repo_column_name] = data[cm.kafka_msg_column_name]
                                     else:
                                         logging.info(f'Column {cm.kafka_msg_column_name} not found from {msg.topic()}! {data}')
                                         # TODO_EH: raise exception?
 
-                                # Now read from the defined table class, providing filter params
-                                logging.info(f'About to read {r.table_class.__name__} for {params}...')
-                                if len(params):
-                                    # Read with params
-                                    new_streaming_data = r.table_class().read(**params)
-
-                                    # Delete rows from df 
-                                    # TODO_PERF: if performance gain is needed, below may be changed to: 
-                                    # delete_rows(self.streaming_data[r.table_class], params)
-                                    self.streaming_data[r.table_class] = delete_rows(self.streaming_data[r.table_class], params, in_place=False)
-
-                                    # Now add new data to the streaming data
-                                    if len(new_streaming_data):
-                                        self.streaming_data[r.table_class] = pd.concat([self.streaming_data[r.table_class], new_streaming_data])
-
-                                else:
-                                    # If no params, full overwrite:
-                                    self.streaming_data[r.table_class] = r.table_class().read()
+                                # Now refresh the in-memory repo for params
+                                r.repo_class().refresh(params)
 
                         except Exception as e:
                             logging.info(f'{type(e).__name__} while reading streaming data: {e} {traceback.format_exc()}')
@@ -492,12 +504,18 @@ class KafkaAPXTransactionMessageConsumer(KafkaMessageConsumer):
             for k, v in before.items():
                 if 'Date' in k and isinstance(v, int):
                     before[k] = (datetime.date(year=1970, month=1, day=1) + datetime.timedelta(days=v))
+            if 'TradeDate' in before:  # Also add trade_date = TradeDate
+                before['trade_date'] = before['TradeDate']
         if isinstance(after, dict):
             for k, v in after.items():
                 if 'Date' in k and isinstance(v, int):
                     after[k] = (datetime.date(year=1970, month=1, day=1) + datetime.timedelta(days=v))
+            if 'TradeDate' in after:  # Also add trade_date = TradeDate
+                after['trade_date'] = after['TradeDate']
 
         if payload['op'] == 'c':
+            # Get portfolio code from in-memory dict
+            # portfolio_code = self.faust_tables[APXDBvPortfolioView][data['PortfolioID']].get('PortfolioCode')
             return (
                 TransactionCommentCreatedEvent(TransactionComment(**after)) 
                     if after.get('TransactionCode').strip() == ';' 
@@ -531,17 +549,11 @@ class KafkaAPXTransactionMessageConsumer(KafkaMessageConsumer):
         if isinstance(before, dict):
             for k, v in before.items():
                 if 'Date' in k and isinstance(v, int):
-                    if abs(v) < 220898880000:  # TODO: is this a desirable threshold to "guess" if ms or days?
-                        before[k] = (datetime.date(year=1970, month=1, day=1) + datetime.timedelta(days=v))
-                    else:
-                        before[k] = (datetime.date(year=1970, month=1, day=1) + datetime.timedelta(days=v/1000/60/60/24))
+                    before[k] = since_epoch_to_datetime(v)
         if isinstance(after, dict):
             for k, v in after.items():
                 if 'Date' in k and isinstance(v, int):
-                    if abs(v) < 220898880000:  # TODO: is this a desirable threshold to "guess" if ms or days?
-                        before[k] = (datetime.date(year=1970, month=1, day=1) + datetime.timedelta(days=v))
-                    else:
-                        before[k] = (datetime.date(year=1970, month=1, day=1) + datetime.timedelta(days=v/1000/60/60/24))
+                    after[k] = since_epoch_to_datetime(v)
         if payload['op'] == 'd':
             return before
         else:

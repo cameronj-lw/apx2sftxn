@@ -159,3 +159,10 @@ cython_debug/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 *.ini
+*.bak
+
+src/app_faust
+src/app_20240510
+src/app_faust_20240505
+src/app_native_streaming_20240505
+src/app/aa_copy.py

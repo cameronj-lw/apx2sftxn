@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Type, Union
 
 # native
 from domain.models import Heartbeat
+from infrastructure.in_memory_repositories import InMemorySingletonSQLRepository
 from infrastructure.util.date import format_time
 from infrastructure.util.logging import get_log_file_full_path
 from infrastructure.util.stored_proc import BaseStoredProc
@@ -26,9 +27,26 @@ class KafkaToStreamingDataColumnMapping:
 
 
 @dataclass
+class KafkaToInMemoryColumnMapping:
+    kafka_msg_column_name: str
+    in_memory_repo_column_name: Union[str,None]=None
+
+    def __post_init__(self):
+        if not self.in_memory_repo_column_name:
+            self.in_memory_repo_column_name = self.kafka_msg_column_name
+
+
+@dataclass
 class StreamingDataToRefresh:
     table_class: Type[Union[BaseTable,BaseStoredProc]]
     column_mapping: List[KafkaToStreamingDataColumnMapping]
+    filter_criteria: Dict[str, List[Any]] = field(default_factory=dict)
+
+
+@dataclass
+class InMemoryDataToRefresh:
+    repo_class: Type[InMemorySingletonSQLRepository]
+    column_mapping: List[KafkaToInMemoryColumnMapping]
     filter_criteria: Dict[str, List[Any]] = field(default_factory=dict)
 
 

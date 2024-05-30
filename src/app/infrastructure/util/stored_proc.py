@@ -27,9 +27,6 @@ class BaseStoredProc(object):
         if not self.config_section:
             raise RuntimeError('Instances of BaseStoredProc must provide a config_section which contains DB connection details')
 
-        if not self.proc_name:
-            raise RuntimeError('Instances of BaseStoredProc must set proc_name')
-
         # If we're overriding the environment we need to recreate the database
         self._database = BaseDB(self.config_section)
 
