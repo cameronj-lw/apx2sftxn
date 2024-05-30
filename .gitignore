@@ -166,3 +166,4 @@ src/app_20240510
 src/app_faust_20240505
 src/app_native_streaming_20240505
 src/app/aa_copy.py
+src/app/infrastructure/test_0501_sells_cost_per_unit.py

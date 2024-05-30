@@ -231,28 +231,37 @@ class CoreDBRealizedGainLossInMemoryRepository(InMemorySingletonSQLRepository):
                                     PKColumnMapping('TranID'), 
                                     PKColumnMapping('LotNumber'), 
                                 ], sql_source=COREDBAPXfRealizedGainLossTable
-                            , relevant_columns=['RealizedGainLoss', 'RealizedGainLossLocal', 'CostBasis', 'CostBasisLocal'])
+                            , relevant_columns=['RealizedGainLoss', 'RealizedGainLossLocal', 'CostBasis', 'CostBasisLocal', 'Quantity'])
     
     def supplement(self, transaction: Transaction):
-        # Supplement further, based on the transaction quantity
+        # Save original quantity (we need to save it back after to avoid it getting overwritten)
+        quantity_orig = transaction.Quantity
+
+        # Supplement as normal
         super().supplement(transaction)
 
         # We need to check if there is a quantity in the supplemental data, and if so, then supplement further:
         supplemental_data = self._get_supplemental_data(transaction)
+        print(supplemental_data)
         if isinstance(supplemental_data, dict):
-            if quantity := supplemental_data.get('Quantity'):
+            if supplemental_quantity := supplemental_data.get('Quantity'):
                 if transaction.PortfolioTransactionID == 13343050:
-                    logging.info(f'{transaction.PortfolioTransactionID} has a quantity from {self.cn}: {quantity}')
+                    logging.info(f'{transaction.PortfolioTransactionID} has a quantity from {self.cn}: {supplemental_quantity}')
+                    print(f'{transaction.PortfolioTransactionID} has a quantity from {self.cn}: {supplemental_quantity}')
                 if hasattr(transaction, 'CostBasis'):
                     if transaction.PortfolioTransactionID == 13343050:
                         logging.info(f'{transaction.PortfolioTransactionID} has a CostBasis {transaction.CostBasis}')
+                        print(f'{transaction.PortfolioTransactionID} has a CostBasis {transaction.CostBasis}')
                     transaction.RptCostBasis = transaction.CostBasis
-                    transaction.RptCostPerUnit = transaction.RptCostBasis / quantity
+                    transaction.RptCostPerUnit = transaction.RptCostBasis / supplemental_quantity
                 else:
                     logging.info(f'{transaction.PortfolioTransactionID} has no CostBasis')
                 if hasattr(transaction, 'CostBasisLocal'):
                     transaction.LocalCostBasis = transaction.CostBasisLocal
-                    transaction.LocalCostPerUnit = transaction.LocalCostBasis / quantity
+                    transaction.LocalCostPerUnit = transaction.LocalCostBasis / supplemental_quantity
+
+        # Save back the original quantity 
+        transaction.Quantity = quantity_orig
 
 
 
