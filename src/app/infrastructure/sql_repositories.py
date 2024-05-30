@@ -26,6 +26,7 @@ from infrastructure.sql_tables import (
     COREDBLWTxnSummaryTable,
 )
 from infrastructure.util.date import get_previous_bday
+from infrastructure.util.math import normal_round
 
 
 """ MGMTDB """
@@ -793,7 +794,7 @@ class COREDBLWTxnSummaryRepository(TransactionRepository):
                     # If the attribute exists for this transaction, populate the dict with its value
                     attr_value = getattr(txn, cm[0])
                     if len(cm) > 2 and attr_value:
-                        attr_value = round(attr_value, cm[2])
+                        attr_value = normal_round(attr_value, cm[2])
                     txn_dict[cm[1]] = attr_value
             txn_dicts.append(txn_dict)
 

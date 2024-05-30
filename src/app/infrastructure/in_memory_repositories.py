@@ -242,7 +242,6 @@ class CoreDBRealizedGainLossInMemoryRepository(InMemorySingletonSQLRepository):
 
         # We need to check if there is a quantity in the supplemental data, and if so, then supplement further:
         supplemental_data = self._get_supplemental_data(transaction)
-        print(supplemental_data)
         if isinstance(supplemental_data, dict):
             if supplemental_quantity := supplemental_data.get('Quantity'):
                 if transaction.PortfolioTransactionID == 13343050:
