@@ -144,16 +144,10 @@ class LWTransactionSummaryEngine(TransactionProcessingEngine):
 
             # APXTxns.pm line 721-734: assign fx rate
             if txn.TradeDateFX and isinstance(txn.TradeDateFX, numbers.Number) and not math.isnan(txn.TradeDateFX):
-                if txn.PortfolioTransactionID == 13358796:
-                    logging.info(f'Assigning 13358796 FxRate a: {txn.TradeDateFX}')
                 txn.FxRate = txn.TradeDateFX
             elif txn.PrincipalCurrencyISOCode1 == txn.ReportingCurrencyISOCode:
-                if txn.PortfolioTransactionID == 13358796:
-                    logging.info(f'Assigning 13358796 FxRate b: 1.0')
                 txn.FxRate = 1.0
             elif txn.TradeAmount and txn.TradeAmountLocal:
-                if txn.PortfolioTransactionID == 13358796:
-                    logging.info(f'Assigning 13358796 FxRate c: {txn.TradeAmount / txn.TradeAmountLocal}')
                 txn.FxRate = txn.TradeAmount / txn.TradeAmountLocal
 
             if (txn.SecTypeBaseCode1 == 'st' and txn.TransactionCode == 'sl') or txn.TransactionCode == 'lo':

@@ -187,6 +187,9 @@ class APXDBDividendRepository(TransactionRepository):
         if not len(dividends):
             return []
 
+        # Read realized gains proc once (avoids reading it for every dividend separately)
+        realized_gains_df = self.realized_gains_proc.read(Portfolios=portfolio_code, FromDate=trade_date, ToDate=trade_date)
+
         for dv in dividends:
             # APXTxns.pm line 353: jam on the LW blinders:  dv are all about SettleDate
             dv.TradeDate = dv.SettleDate
@@ -216,9 +219,8 @@ class APXDBDividendRepository(TransactionRepository):
                     # TODO: need to delete the sl txn? - APXTxns.pm line 481
 
                 # line 484-518: combine the gains 
-                # Need to read realized gains first:  # TODO: could this be made more efficient, rather than querying for every dividend? 
-                res_df = self.realized_gains_proc.read(Portfolios=portfolio_code, FromDate=dv.SettleDate, ToDate=dv.SettleDate)
-                realized_gains_transactions = [Transaction(**d) for d in res_df.to_dict('records') if d['PortfolioTransactionID'] == sl.PortfolioTransactionID]
+                # Need to find realized gains first:                
+                realized_gains_transactions = [Transaction(**d) for d in realized_gains_df.to_dict('records') if d['PortfolioTransactionID'] == sl.PortfolioTransactionID]
                 if len(realized_gains_transactions):
                     # If we reached here, there is a relevant "realized gain" to combine with:
                     realized_gains_transaction = realized_gains_transactions[0]
