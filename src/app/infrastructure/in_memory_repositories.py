@@ -202,6 +202,12 @@ class APXDBvSecurityInMemoryRepository(InMemorySingletonSQLRepository):
             for key, value in supplemental_data.items():
                 setattr(transaction, f'{key}{suffix}', value)
 
+            # For CouponDelayDays: 253 is the APX internal value for "use Sec Type". 
+            # If we find this value is 253, set a separate attribute of the transaction.
+            # This would allow application layer logic to use it, without infrastructure layer bleeding into application layer.
+            if supplemental_data['CouponDelayDays'] == 253:
+                setattr(transaction, f'UseSecTypeForCouponDelayDays{suffix}', True)
+
 class APXDBvFXRateInMemoryRepository(InMemorySingletonSQLRepository):
     def __init__(self):
         super().__init__(pk_columns=[
