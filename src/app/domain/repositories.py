@@ -53,7 +53,7 @@ class SupplementaryRepository(ABC):
     def get(self, pk_column_values: Dict[str, Any]) -> dict:
         pass
 
-    def supplement(self, transaction: Transaction):  # TODO: should this instead copy the transaction and return a new supplemented transaction?
+    def supplement(self, transaction: Transaction) -> Union[Dict, None]:
         """ Default behaviour to supplement a transaction. Subclasses should override for other desired behaviour """
         
         supplemental_data = self._get_supplemental_data(transaction)
@@ -64,6 +64,10 @@ class SupplementaryRepository(ABC):
                 setattr(transaction, key, value)
         else:
             logging.debug(f'{self.cn} has no supplemental data for {transaction}')
+
+        # Return supplemental data. 
+        # The caller may benefit from being provided the supplemental data for other purpose (e.g. efficiency gain)
+        return supplemental_data
 
     def _get_supplemental_data(self, transaction: Transaction) -> Union[Dict, None]:
 

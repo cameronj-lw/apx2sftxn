@@ -107,6 +107,13 @@ class LWTransactionSummaryEngine(TransactionProcessingEngine):
     # transaction_name_repo: SupplementaryRepository  # To get transaction names, at the end
     # historical_transaction_repo: TransactionRepository  # We'll query from this when needed, to find historical transactions
 
+    def preprocessing_supplement(self, transactions: List[Transaction]):
+        # Supplement with "pre-processing" supplementary repos, to get additional fields
+        for txn in transactions:
+            txn.trade_date_original = txn.TradeDate  # Since for dividends, we may change the TradeDate later
+            for sr in self.preprocessing_supplementary_repos:
+                sr.supplement(txn)
+
     def process(self, queue_item: TransactionProcessingQueueItem) -> List[Transaction]:
         logging.info(f'{self.cn} processing {queue_item}')
         
@@ -123,19 +130,7 @@ class LWTransactionSummaryEngine(TransactionProcessingEngine):
         transactions.extend(dividends)
 
         # First, supplement with "pre-processing" supplementary repos, to get additional fields
-        for txn in transactions:
-            txn.trade_date_original = txn.TradeDate  # Since for dividends, we may change the TradeDate later
-            for sr in self.preprocessing_supplementary_repos:
-                if txn.PortfolioTransactionID==13291929:
-                    logging.info(f'Supplementing {txn} with {sr.cn}...')
-                sr.supplement(txn)
-                if txn.PortfolioTransactionID==13291929:
-                    logging.info(f'Post-supplement: {txn}')
-
-
-        # 0a. Assign FX rate
-
-
+        self.preprocessing_supplement(transactions)
 
         # 0a. Assign FX rate
         # 0b. Pull prev bday cost info, if needed
@@ -187,7 +182,7 @@ class LWTransactionSummaryEngine(TransactionProcessingEngine):
 
                 if txn.Symbol2.lower() in ('client'):
                     # Assign sec1 fields from sec2:
-                    for col in ['SecurityID', 'ProprietarySymbol', 'PrincipalCurrencyCode', 'FullName', 'Name4Stmt', 'Name4Trading']:
+                    for col in ['Symbol', 'SecurityID', 'ProprietarySymbol', 'PrincipalCurrencyCode', 'FullName', 'Name4Stmt', 'Name4Trading']:
                         sec2_value = getattr(txn, f'{col}2')
                         setattr(txn, f'{col}1', sec2_value)
                         
@@ -224,7 +219,7 @@ class LWTransactionSummaryEngine(TransactionProcessingEngine):
                     indices_to_remove.append(i)
                     continue
                 elif txn.Symbol1 == 'income' and txn.Symbol2 == 'cash' and txn.SecTypeBaseCode2 == 'aw':
-                    txn.Symbol1 == 'client'
+                    txn.Symbol1 = 'client'
                 else:
                     indices_to_remove.append(i)
                     continue
@@ -532,16 +527,16 @@ class LWTransactionSummaryEngine(TransactionProcessingEngine):
                 txn.RspContribAmt = 0.0
 
         for txn in transactions:
-
-            # Supplement with "post-processing" repos:
-            for repo in self.postprocessing_supplementary_repos:
-                repo.supplement(txn)
-
-        for txn in transactions:
             # Populate sec columns from Security1
             for col in ['FullName', 'Name4Stmt', 'Name4Trading']:
                 if hasattr(txn, f'{col}1'):
                     setattr(txn, col, getattr(txn, f'{col}1'))
+
+        for txn in transactions:
+
+            # Supplement with "post-processing" repos:
+            for repo in self.postprocessing_supplementary_repos:
+                repo.supplement(txn)
 
             # Populate the portfolio_code, modified_by, trade_date
             txn.portfolio_code = queue_item.portfolio_code

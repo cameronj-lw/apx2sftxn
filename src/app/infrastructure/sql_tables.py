@@ -420,7 +420,8 @@ class COREDBAPXfRealizedGainLossTable(BaseTable):
 	config_section = 'coredb'
 	table_name = 'apx_fRealizedGainLoss'
 
-	def read(self, portfolio_id=None, portfolio_code=None, from_date=None, to_date=None, PortfolioTransactionID=None):
+	def read(self, portfolio_id=None, portfolio_code=None, from_date=None, to_date=None
+				, PortfolioTransactionID=None, TranID=None, LotNumber=None):
 		"""
 		Read all entries, optionally with criteria
 
@@ -437,6 +438,10 @@ class COREDBAPXfRealizedGainLossTable(BaseTable):
 			stmt = stmt.where(self.c.CloseDate <= to_date) if from_date else stmt.where(self.c.CloseDate == to_date)
 		if PortfolioTransactionID is not None:
 			stmt = stmt.where(self.c.PortfolioTransactionID == PortfolioTransactionID)
+		if TranID is not None:
+			stmt = stmt.where(self.c.TranID == TranID)
+		if LotNumber is not None:
+			stmt = stmt.where(self.c.LotNumber == LotNumber)
 		return self.execute_read(stmt)
 
 	

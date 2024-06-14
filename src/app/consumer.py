@@ -24,13 +24,13 @@ from infrastructure.in_memory_repositories import (
     APXDBvPortfolioInMemoryRepository, APXDBvPortfolioSettingExInMemoryRepository, 
     APXDBvPortfolioBaseInMemoryRepository, APXDBvPortfolioBaseCustomInMemoryRepository, APXDBvPortfolioBaseSettingExInMemoryRepository,
     APXDBvCurrencyInMemoryRepository, APXDBvCustodianInMemoryRepository,
-    CoreDBRealizedGainLossInMemoryRepository,
 )
 from infrastructure.sql_repositories import (
     MGMTDBHeartbeatRepository, 
-    CoreDBRealizedGainLossQueueRepository, CoreDBRealizedGainLossRepository, APXDBRealizedGainLossRepository,
+    CoreDBRealizedGainLossQueueRepository, CoreDBRealizedGainLossTransactionRepository, APXDBRealizedGainLossRepository,
     CoreDBTransactionActivityQueueRepository, CoreDBTransactionActivityRepository, APXDBTransactionActivityRepository,    
     CoreDBLWTransactionSummaryQueueRepository, CoreDBLWTransactionSummaryRepository, LWDBAPXAppraisalPrevBdayRepository,
+    CoreDBRealizedGainLossSupplementaryRepository,
     APXRepDBLWTxnSummaryRepository, COREDBLWTxnSummaryRepository,
     APXDBDividendRepository,
 )
@@ -54,7 +54,7 @@ def main():
     engines = [
         StraightThruTransactionProcessingEngine(
             source_queue_repo = CoreDBRealizedGainLossQueueRepository(),
-            target_txn_repos = [CoreDBRealizedGainLossRepository()],
+            target_txn_repos = [CoreDBRealizedGainLossTransactionRepository()],
             target_queue_repos = [CoreDBTransactionActivityQueueRepository()],
             source_txn_repo = APXDBRealizedGainLossRepository(),
         ),
@@ -83,11 +83,12 @@ def main():
                 APXRepDBSecurityHashInMemoryRepository(),
                 APXDBvCurrencyInMemoryRepository(),
                 APXDBvCustodianInMemoryRepository(),
-                CoreDBRealizedGainLossInMemoryRepository(),
+                CoreDBRealizedGainLossSupplementaryRepository(),
                 # APXDBPastDividendRepository(),
             ],
             prev_bday_cost_repo = LWDBAPXAppraisalPrevBdayRepository(),
             postprocessing_supplementary_repos = [
+                # TODO_LAYERS: should these logics just be part of the engine?
                 TransactionNameRepository(),
                 TransactionSectionAndStmtTranRepository(),
                 TransactionOtherPostSupplementRepository(),

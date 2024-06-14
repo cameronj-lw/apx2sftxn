@@ -157,8 +157,6 @@ class APXDBvPortfolioBaseSettingExInMemoryRepository(InMemorySingletonSQLReposit
 
 class APXDBvCurrencyInMemoryRepository(InMemorySingletonSQLRepository):
     def __init__(self):
-        # TODO: any different PK columns desired, e.g. also for DenomCurrCode?
-        # TODO: should this class override the SupplementaryRepository.supplement?
         super().__init__(pk_columns=[PKColumnMapping('FXNumeratorCurrencyCode', 'CurrencyCode')], sql_source=APXDBvCurrencyView
                             , relevant_columns=['ISOCode'])
 
@@ -225,6 +223,7 @@ class APXDBvCustodianInMemoryRepository(InMemorySingletonSQLRepository):
 
 
 class CoreDBRealizedGainLossInMemoryRepository(InMemorySingletonSQLRepository):
+    # TODO_CLEANUP: delete this class (not used)
     def __init__(self):
         super().__init__(pk_columns=[
                                     PKColumnMapping('PortfolioTransactionID'), 
@@ -244,17 +243,11 @@ class CoreDBRealizedGainLossInMemoryRepository(InMemorySingletonSQLRepository):
         supplemental_data = self._get_supplemental_data(transaction)
         if isinstance(supplemental_data, dict):
             if supplemental_quantity := supplemental_data.get('Quantity'):
-                if transaction.PortfolioTransactionID == 13343050:
-                    logging.info(f'{transaction.PortfolioTransactionID} has a quantity from {self.cn}: {supplemental_quantity}')
-                    print(f'{transaction.PortfolioTransactionID} has a quantity from {self.cn}: {supplemental_quantity}')
                 if hasattr(transaction, 'CostBasis'):
-                    if transaction.PortfolioTransactionID == 13343050:
-                        logging.info(f'{transaction.PortfolioTransactionID} has a CostBasis {transaction.CostBasis}')
-                        print(f'{transaction.PortfolioTransactionID} has a CostBasis {transaction.CostBasis}')
                     transaction.RptCostBasis = transaction.CostBasis
                     transaction.RptCostPerUnit = transaction.RptCostBasis / supplemental_quantity
                 else:
-                    logging.info(f'{transaction.PortfolioTransactionID} has no CostBasis')
+                    logging.debug(f'{transaction.PortfolioTransactionID} has no CostBasis')
                 if hasattr(transaction, 'CostBasisLocal'):
                     transaction.LocalCostBasis = transaction.CostBasisLocal
                     transaction.LocalCostPerUnit = transaction.LocalCostBasis / supplemental_quantity

@@ -67,7 +67,7 @@ class TransactionNameRepository(SupplementaryRepository):
             transaction.TransactionName = 'Cost Adjustment'
         
         else:
-            pass  # TODO_EH: exception?
+            transaction.TransactionName = 'Unknown'  # pass  # TODO_EH: exception?
 
 
 class TransactionSectionAndStmtTranRepository(SupplementaryRepository):
@@ -164,9 +164,9 @@ class TransactionOtherPostSupplementRepository(SupplementaryRepository):
             transaction.TradeAmount = -1.0 * transaction.TradeAmount
             transaction.TradeAmountLocal = -1.0 * transaction.TradeAmountLocal
             # TODO: make "tiny" amounts into None? Saem applies to RealizedGain, Proceeds, Quantity?
-        elif transaction.TransactionCode in ('wd') and transaction.Name4Stmt == 'client':
-            transaction.Name4Stmt = 'CASH WITHDRAWAL'
-        elif transaction.TransactionCode in ('dp') and transaction.Name4Stmt == 'client':
+            if transaction.TransactionCode in ('wd') and transaction.Symbol1 == 'client':
+                transaction.Name4Stmt = 'CASH WITHDRAWAL'
+        elif transaction.TransactionCode in ('dp') and transaction.Symbol1 == 'client':
             transaction.Name4Stmt = 'CASH DEPOSIT'
 
 

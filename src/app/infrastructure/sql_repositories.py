@@ -13,7 +13,7 @@ from sqlalchemy import sql
 # native
 from domain.models import Heartbeat, Transaction, TransactionProcessingQueueItem, QueueStatus, PKColumnMapping
 from domain.repositories import HeartbeatRepository, TransactionRepository, TransactionProcessingQueueRepository, SupplementaryRepository
-from infrastructure.in_memory_repositories import CoreDBRealizedGainLossInMemoryRepository
+# from infrastructure.in_memory_repositories import CoreDBRealizedGainLossInMemoryRepository
 from infrastructure.models import MGMTDBHeartbeat
 from infrastructure.sql_procs import APXDBRealizedGainLossProcAndFunc, APXDBTransactionActivityProcAndFunc
 from infrastructure.sql_tables import (
@@ -499,10 +499,64 @@ class CoreDBLWTransactionSummaryQueueRepository(TransactionProcessingQueueReposi
                             , queue_status=QueueStatus.from_value(r['queue_status'])) for r in res_df.to_dict('records')]
         return res_queue_items
 
-
-class CoreDBRealizedGainLossRepository(TransactionRepository):
+class CoreDBRealizedGainLossSupplementaryRepository(SupplementaryRepository):
     table = COREDBAPXfRealizedGainLossTable()
-    repo_to_refresh = CoreDBRealizedGainLossInMemoryRepository()
+    relevant_columns = ['RealizedGainLoss', 'RealizedGainLossLocal', 'CostBasis', 'CostBasisLocal', 'Quantity']
+
+    def __init__(self):
+        super().__init__(pk_columns=[
+                                    PKColumnMapping('PortfolioTransactionID'), 
+                                    PKColumnMapping('TranID'), 
+                                    PKColumnMapping('LotNumber'), 
+                                ])
+    
+    def create(self, data: Dict[str, Any]) -> int:
+        raise NotImplementedError(f'Cannot save to {self.cn}! Should you use CoreDBRealizedGainLossTransactionRepository instead?')
+
+    def get(self, pk_column_values: Dict[str, Any]) -> dict:
+        # Query table
+        res_df = self.table.read(**pk_column_values)
+        
+        # Convert to list of dicts
+        res_dicts = res_df[self.relevant_columns].to_dict('records')
+
+        # Should be 1 row max... sanity check... # TODO_EH: what if this has more than one row?
+        if len(res_dicts) > 1: 
+            logging.info(f"Found multiple rows in {self.table.cn} for {pk_column_values}!")
+            return res_dicts[0]
+        elif len(res_dicts):
+            return res_dicts[0]
+        else:
+            logging.info(f"Found 0 rows in {self.table.cn} for {pk_column_values}!")
+            return {}
+
+    def supplement(self, transaction: Transaction):
+        # Save original quantity (we need to save it back after to avoid it getting overwritten)
+        quantity_orig = transaction.Quantity
+
+        # Supplement as normal
+        # Also save the supplemental data for use below
+        supplemental_data = super().supplement(transaction)
+
+        # We need to check if there is a quantity in the supplemental data, and if so, then supplement further:
+        if isinstance(supplemental_data, dict):
+            if supplemental_quantity := supplemental_data.get('Quantity'):
+                if hasattr(transaction, 'CostBasis'):
+                    transaction.RptCostBasis = transaction.CostBasis
+                    transaction.RptCostPerUnit = transaction.RptCostBasis / supplemental_quantity
+                else:
+                    logging.debug(f'{transaction.PortfolioTransactionID} has no CostBasis')
+                if hasattr(transaction, 'CostBasisLocal'):
+                    transaction.LocalCostBasis = transaction.CostBasisLocal
+                    transaction.LocalCostPerUnit = transaction.LocalCostBasis / supplemental_quantity
+
+        # Save back the original quantity 
+        transaction.Quantity = quantity_orig
+
+
+class CoreDBRealizedGainLossTransactionRepository(TransactionRepository):
+    table = COREDBAPXfRealizedGainLossTable()
+    repo_to_refresh = None  # CoreDBRealizedGainLossInMemoryRepository()
 
     def create(self, transactions: Union[List[Transaction],Transaction]) -> int:
         # May be a Transaction. If so, make it a list:
