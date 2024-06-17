@@ -103,3 +103,12 @@ class MGMTDBHeartbeat(Heartbeat):
             return hb
         except KeyError as e:
             raise InvalidDictError(f"Missing required field: {e}")
+
+
+@dataclass
+class Txn2TableColMap:
+    transaction_attribute: str
+    table_column: str
+    round_to_decimal_places: Union[int, None] = None
+    populate_none_with_zero: bool = False
+

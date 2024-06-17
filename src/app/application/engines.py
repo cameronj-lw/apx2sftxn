@@ -394,6 +394,8 @@ class LWTransactionSummaryEngine(TransactionProcessingEngine):
                                                 'MMA', 'USSMA', 'USSMB', 'USSMF', 'IBHA', 'IBHB', 'MCA', 'MCB', 'MCF', 
                                                 'STIFA', 'STIFB', 'STIFF', 'STIFI1', 'UMMA', 'UMMB', 'UMMF', 'TRFI1'):
                     txn.TransactionName = 'Interest Received'
+                else:
+                    txn.TransactionName = 'Dividend'
             else:
                 txn.TransactionName = 'Dividend'
 
@@ -522,6 +524,14 @@ class LWTransactionSummaryEngine(TransactionProcessingEngine):
             elif txn.TransactionCode == 'dp':
                 txn.Name4Stmt = 'CASH DEPOSIT'
 
+    def unassign_gains_proceeds_quantity_if_zero(self, txn: Transaction):
+        # apx2txnrpts.pl line 1459-1464
+        for attr in ('RealizedGain', 'Proceeds', 'Quantity'):
+            if not getattr(txn, attr, None):
+                setattr(txn, attr, None)  
+                # TODO: Using setattr rather than delattr to make it traceable... 
+                # but perhaps delattr is more readable? And aligned better to the perl equivalent?
+
     def assign_cash_flow(self, txn: Transaction):
         # apx2txnrpts.pl line 1467-1478
         if txn.TransactionCode in ('by'):
@@ -529,7 +539,7 @@ class LWTransactionSummaryEngine(TransactionProcessingEngine):
         else:
             txn.CashFlow = txn.TradeAmount
 
-    def assign_standard_attributes(self, txn: Transaction, queue_item: TransactionQueueItem):
+    def assign_standard_attributes(self, txn: Transaction, queue_item: TransactionProcessingQueueItem):
         # Populate the portfolio_code, modified_by, trade_date
         txn.portfolio_code = queue_item.portfolio_code
         txn.trade_date_original = queue_item.trade_date
@@ -723,6 +733,8 @@ class LWTransactionSummaryEngine(TransactionProcessingEngine):
             self.reverse_amount_signs(txn)
 
             self.assign_name4stmt_for_client_wd_dp(txn)
+
+            self.unassign_gains_proceeds_quantity_if_zero(txn)
 
             self.assign_cash_flow(txn)
 

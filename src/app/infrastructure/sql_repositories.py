@@ -14,7 +14,7 @@ from sqlalchemy import sql
 from domain.models import Heartbeat, Transaction, TransactionProcessingQueueItem, QueueStatus, PKColumnMapping
 from domain.repositories import HeartbeatRepository, TransactionRepository, TransactionProcessingQueueRepository, SupplementaryRepository
 # from infrastructure.in_memory_repositories import CoreDBRealizedGainLossInMemoryRepository
-from infrastructure.models import MGMTDBHeartbeat
+from infrastructure.models import MGMTDBHeartbeat, Txn2TableColMap
 from infrastructure.sql_procs import APXDBRealizedGainLossProcAndFunc, APXDBTransactionActivityProcAndFunc
 from infrastructure.sql_tables import (
     APXRepDBLWTxnSummaryTable,
@@ -774,59 +774,59 @@ class COREDBSFTransactionRepository(TransactionRepository):
 
 class COREDBLWTxnSummaryRepository(TransactionRepository):
     table = COREDBLWTxnSummaryTable()
-    txn2table_columns = [
-        # ({transaction attribute}, {table column}, {number of decimal places})
-        ('PortfolioCode'    , 'portfolio_code'),
-        ('PortfolioName'    , 'portfolio_name'),
-        ('TransactionCode'  , 'tran_code'),
-        ('TradeDate'        , 'trade_date'),
-        ('SettleDate'       , 'settle_date'),
-        ('Symbol1'          , 'symbol'),
-        # ('Cusip'    , 'cusip'),  # TODO_CLEANUP: seems cusip is always null in current table ... remove once confirmed not needed
-        ('Name4Stmt'        , 'name4stmt'),
-        ('Quantity'         , 'quantity', 9),
-        ('TradeAmount'      , 'trade_amount', 2),
-        ('CashFlow'         , 'cash_flow', 2),
-        ('BrokerName'       , 'broker_name'),
-        ('CustodianName'    , 'custodian_name'),
-        ('CustAcctNotify'   , 'cust_acct_notify'),
-        ('PricePerUnit'     , 'price_per_unit', 9),
-        ('Commission'       , 'commission', 2),
-        ('NetInterest'      , 'net_interest', 2),
-        ('NetDividend'      , 'net_dividend', 2),
-        ('NetFgnIncome'     , 'net_fgn_income', 2),
-        ('CapGainsDistrib'  , 'cap_gains_distrib'),
-        ('TotalIncome'      , 'tot_income', 2),
-        ('RealizedGain'     , 'realized_gain', 2),
-        ('TfsaContribAmt'   , 'tfsa_contrib_amt', 2),
-        ('RspContribAmt'    , 'rsp_contrib_amt', 2),
-        ('RetOfCapital'     , 'net_return_of_capital', 2),
-        # ('SecurityID1'      , 'security_id1'),
-        # ('SecurityID2'      , 'security_id2'),
-        ('Symbol1'          , 'symbol1'),
-        # ('Symbol2'          , 'symbol2'),
-        ('SecTypeCode1'     , 'sectype1'),
-        ('SecTypeCode2'     , 'sectype2'),
-        # ('TxnUserDef3Name'  , 'source'),  # TODO_CLEANUP: seems source is always null in current table ... remove once confirmed not needed
-        # ('PortfolioCode'    , 'market_name'),  # TODO_CLEANUP: seems market_name is always null in current table ... remove once confirmed not needed
-        ('CostPerUnit'      , 'cost_per_unit', 9),
-        ('CostBasis'        , 'total_cost', 2),
-        ('LocalTranKey'     , 'local_tran_key'),
-        ('TransactionName'  , 'tran_desc'),
-        ('Comment01'        , 'comment01'),
-        ('SectionDesc'      , 'section_desc'),
-        ('StmtTranDesc'     , 'stmt_tran_desc'),
-        ('NetEligDividend'  , 'net_elig_dividend', 2),
-        ('NetNonEligDividend', 'net_non_elig_dividend', 2),
-        ('FxRate'           , 'fx_rate', 4),
-        ('PrincipalCurrencyISOCode1', 'fx_denom_ccy'),
-        ('ReportingCurrencyISOCode', 'fx_numer_ccy'),
-        ('WhFedTaxAmt'      , 'whfedtax_amt', 2),
-        ('WhNrTaxAmt'       , 'whnrtax_amt', 2),
-        ('TradeAmountLocal' , 'trade_amount_local', 2),
-        ('CostPerUnitLocal' , 'cost_per_unit_local', 9),
-        ('CostBasisLocal'   , 'total_cost_local', 2),
-        ('trade_date_original', 'trade_date_original'),
+    txn2table_column_mappings = [
+        # ({transaction attribute}, {table column}, {number of decimal places}, {})
+        Txn2TableColMap('PortfolioCode'    , 'portfolio_code'),
+        Txn2TableColMap('PortfolioName'    , 'portfolio_name'),
+        Txn2TableColMap('TransactionCode'  , 'tran_code'),
+        Txn2TableColMap('TradeDate'        , 'trade_date'),
+        Txn2TableColMap('SettleDate'       , 'settle_date'),
+        Txn2TableColMap('Symbol1'          , 'symbol'),
+        # Txn2TableColMap('Cusip'    , 'cusip'),  # TODO_CLEANUP: seems cusip is always null in current table ... remove once confirmed not needed
+        Txn2TableColMap('Name4Stmt'        , 'name4stmt'),
+        Txn2TableColMap('Quantity'         , 'quantity', 9),
+        Txn2TableColMap('TradeAmount'      , 'trade_amount', 2),
+        Txn2TableColMap('CashFlow'         , 'cash_flow', 2),
+        Txn2TableColMap('BrokerName'       , 'broker_name'),
+        Txn2TableColMap('CustodianName'    , 'custodian_name'),
+        Txn2TableColMap('CustAcctNotify'   , 'cust_acct_notify'),
+        Txn2TableColMap('PricePerUnit'     , 'price_per_unit', 9),
+        Txn2TableColMap('Commission'       , 'commission', 2, populate_none_with_zero=True),
+        Txn2TableColMap('NetInterest'      , 'net_interest', 2, populate_none_with_zero=True),
+        Txn2TableColMap('NetDividend'      , 'net_dividend', 2, populate_none_with_zero=True),
+        Txn2TableColMap('NetFgnIncome'     , 'net_fgn_income', 2, populate_none_with_zero=True),
+        Txn2TableColMap('CapGainsDistrib'  , 'cap_gains_distrib', populate_none_with_zero=True),
+        Txn2TableColMap('TotalIncome'      , 'tot_income', 2, populate_none_with_zero=True),
+        Txn2TableColMap('RealizedGain'     , 'realized_gain', 2, populate_none_with_zero=False),
+        Txn2TableColMap('TfsaContribAmt'   , 'tfsa_contrib_amt', 2, populate_none_with_zero=True),
+        Txn2TableColMap('RspContribAmt'    , 'rsp_contrib_amt', 2, populate_none_with_zero=True),
+        Txn2TableColMap('RetOfCapital'     , 'net_return_of_capital', 2, populate_none_with_zero=True),
+        # Txn2TableColMap('SecurityID1'      , 'security_id1'),
+        # Txn2TableColMap('SecurityID2'      , 'security_id2'),
+        Txn2TableColMap('Symbol1'          , 'symbol1'),
+        # Txn2TableColMap('Symbol2'          , 'symbol2'),
+        Txn2TableColMap('SecTypeCode1'     , 'sectype1'),
+        Txn2TableColMap('SecTypeCode2'     , 'sectype2'),
+        # Txn2TableColMap('TxnUserDef3Name'  , 'source'),  # TODO_CLEANUP: seems source is always null in current table ... remove once confirmed not needed
+        # Txn2TableColMap('PortfolioCode'    , 'market_name'),  # TODO_CLEANUP: seems market_name is always null in current table ... remove once confirmed not needed
+        Txn2TableColMap('CostPerUnit'      , 'cost_per_unit', 9),
+        Txn2TableColMap('CostBasis'        , 'total_cost', 2),
+        Txn2TableColMap('LocalTranKey'     , 'local_tran_key'),
+        Txn2TableColMap('TransactionName'  , 'tran_desc'),
+        Txn2TableColMap('Comment01'        , 'comment01'),
+        Txn2TableColMap('SectionDesc'      , 'section_desc'),
+        Txn2TableColMap('StmtTranDesc'     , 'stmt_tran_desc'),
+        Txn2TableColMap('NetEligDividend'  , 'net_elig_dividend', 2, populate_none_with_zero=True),
+        Txn2TableColMap('NetNonEligDividend', 'net_non_elig_dividend', 2, populate_none_with_zero=True),
+        Txn2TableColMap('FxRate'           , 'fx_rate', 9),
+        Txn2TableColMap('PrincipalCurrencyISOCode1', 'fx_denom_ccy'),
+        Txn2TableColMap('ReportingCurrencyISOCode', 'fx_numer_ccy'),
+        Txn2TableColMap('WhFedTaxAmt'      , 'whfedtax_amt', 2, populate_none_with_zero=True),
+        Txn2TableColMap('WhNrTaxAmt'       , 'whnrtax_amt', 2, populate_none_with_zero=True),
+        Txn2TableColMap('TradeAmountLocal' , 'trade_amount_local', 2),
+        Txn2TableColMap('CostPerUnitLocal' , 'cost_per_unit_local', 9),
+        Txn2TableColMap('CostBasisLocal'   , 'total_cost_local', 2),
+        Txn2TableColMap('trade_date_original', 'trade_date_original'),
     ]
 
     def create(self, transactions: Union[List[Transaction],Transaction]) -> int:
@@ -845,13 +845,23 @@ class COREDBLWTxnSummaryRepository(TransactionRepository):
         }
         for txn in transactions:
             txn_dict = common_dict.copy()
-            for cm in self.txn2table_columns:
-                if hasattr(txn, cm[0]):
-                    # If the attribute exists for this transaction, populate the dict with its value
-                    attr_value = getattr(txn, cm[0])
-                    if len(cm) > 2 and attr_value:
-                        attr_value = normal_round(attr_value, cm[2])
-                    txn_dict[cm[1]] = attr_value
+            for cm in self.txn2table_column_mappings:
+                # if hasattr(txn, cm.transaction_attribute):
+                # If the attribute exists for this transaction, populate the dict with its value
+                attr_value = getattr(txn, cm.transaction_attribute, None)
+
+                # Round, if specified
+                if cm.round_to_decimal_places and attr_value:
+                    attr_value = normal_round(attr_value, cm.round_to_decimal_places)
+
+                # Replace None with 0.0, if specified
+                if cm.populate_none_with_zero and (not attr_value or pd.isna(attr_value)):
+                    attr_value = 0.0
+
+                # Assign value in dict
+                txn_dict[cm.table_column] = attr_value
+            
+            # Now we have the dict containing all desired values for the row. Append it:
             txn_dicts.append(txn_dict)
 
             # Also create & append delete stmt, if it's not already there:

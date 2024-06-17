@@ -60,7 +60,7 @@ def df_to_dict(df, pk_col_names: List[str]) -> Dict[Any, Dict[str, Any]]:
 
 
 # Function to compare two dataframes row by row
-def compare_dataframes(df1, df2, match_columns, exclude_columns, ignore_zeros_vs_none=True):
+def compare_dataframes(df1, df2, match_columns, exclude_columns, tolerances={}, ignore_zeros_vs_none=True):
     # Initialize lists to store matched rows, unmatched rows, and matching rows with differences
     matched_rows = []
     unmatched_rows_df1 = []
@@ -68,9 +68,19 @@ def compare_dataframes(df1, df2, match_columns, exclude_columns, ignore_zeros_vs
     matching_rows_with_differences = []
     
     # Define function to determine if two values are equal
-    def are_equal(val1, val2, ignore_zeros_vs_none=True):
+    def are_equal(val1, val2, tolerance=None, ignore_zeros_vs_none=True):
+        # Handle np.nan
+        if pd.isna(val1) and pd.isna(val2):
+            return True
+
+        # Surface zero vs None as diffs (if specified)
         if not ignore_zeros_vs_none:
-            return val1 == val2
+            if tolerance:
+                return (abs(val1 - val2 <= tolerance))
+            else:
+                return val1 == val2
+        
+        # From here below only applies for ignore_zeros_vs_none
         if (val1 == 0 or pd.isna(val1) or val1 is None) and (val2 == 0 or pd.isna(val2) or val2 is None):
             return True
         # if pd.isna(val1) and pd.isna(val2):
@@ -79,7 +89,11 @@ def compare_dataframes(df1, df2, match_columns, exclude_columns, ignore_zeros_vs
         #     return True
         # if val1 == 0 and val2 == 0:
         #     return True
-        return val1 == val2
+
+        if tolerance:
+            return (abs(val1 - val2 <= tolerance))
+        else:
+            return val1 == val2
     
     # Iterate over rows in df1
     for index, row1 in df1.iterrows():
@@ -93,11 +107,11 @@ def compare_dataframes(df1, df2, match_columns, exclude_columns, ignore_zeros_vs
             # Iterate over filtered rows in df2
             for index2, row2 in filtered_df2.iterrows():
                 # Check if the values of selected columns match
-                if all(are_equal(row1[col], row2[col], ignore_zeros_vs_none) for col in df1.columns if col not in exclude_columns):
+                if all(are_equal(row1[col], row2[col], tolerances.get(col), ignore_zeros_vs_none) for col in df1.columns if col not in exclude_columns):
                     matched_rows.append((row1, row2))
                 else:
                     # Find non-matching columns
-                    non_matching_columns = [col for col in df1.columns if col not in exclude_columns and not are_equal(row1[col], row2[col], ignore_zeros_vs_none)]
+                    non_matching_columns = [col for col in df1.columns if col not in exclude_columns and not are_equal(row1[col], row2[col], tolerances.get(col), ignore_zeros_vs_none)]
                     matching_rows_with_differences.append((row1, row2, non_matching_columns))
     
     # Find unmatched rows in df2
