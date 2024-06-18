@@ -2,6 +2,8 @@
 DataFrame utils not provided by Pandas
 """
 
+import datetime
+
 import pandas as pd
 
 from typing import Any, Dict, List
@@ -60,7 +62,7 @@ def df_to_dict(df, pk_col_names: List[str]) -> Dict[Any, Dict[str, Any]]:
 
 
 # Function to compare two dataframes row by row
-def compare_dataframes(df1, df2, match_columns, exclude_columns, tolerances={}, ignore_zeros_vs_none=True):
+def compare_dataframes(df1, df2, match_columns, exclude_columns, tolerances={}, ignore_zeros_vs_none=True, typecast_dates=True):
     # Initialize lists to store matched rows, unmatched rows, and matching rows with differences
     matched_rows = []
     unmatched_rows_df1 = []
@@ -68,7 +70,7 @@ def compare_dataframes(df1, df2, match_columns, exclude_columns, tolerances={}, 
     matching_rows_with_differences = []
     
     # Define function to determine if two values are equal
-    def are_equal(val1, val2, tolerance=None, ignore_zeros_vs_none=True):
+    def are_equal(val1, val2, tolerance=None, ignore_zeros_vs_none=True, typecast_dates=True):
         # Handle np.nan
         if pd.isna(val1) and pd.isna(val2):
             return True
@@ -78,6 +80,13 @@ def compare_dataframes(df1, df2, match_columns, exclude_columns, tolerances={}, 
             if tolerance:
                 return (abs(val1 - val2 <= tolerance))
             else:
+                # if typecast_dates:  # and isinstance(val1, datetime.date) and not isinstance(val2, datetime.date):
+                #     # print(type(val1))
+                #     # print(type(val2))
+                #     try:
+                #         return datetime.datetime.fromisoformat(val1).date() == datetime.datetime.fromisoformat(val2).date()
+                #     except Exception as e:
+                #         pass
                 return val1 == val2
         
         # From here below only applies for ignore_zeros_vs_none
@@ -129,18 +138,18 @@ def compare_dataframes(df1, df2, match_columns, exclude_columns, tolerances={}, 
         # print(row1)
         # print("Table 2:")
         # print(row2)
-        print(f"{row1['tran_code']} {row1['local_tran_key']} Non-matching columns: {len(non_matching_columns)}")
+        print(f"{row1.get('tran_code') or row1.get('tran_code__c')} {row1.get('local_tran_key') or row1.get('lw_tran_id__c')} Non-matching columns: {len(non_matching_columns)}")
         for col in non_matching_columns:
             print(f"{col}: {row1[col]} (Table 1) vs {row2[col]} (Table 2)")
         print("\n")
     
     print(f"Unmatched rows in Table 1: {len(unmatched_rows_df1)}")
     for row1 in unmatched_rows_df1:
-        print(f"{row1['tran_code']} {row1['local_tran_key']}")
+        print(f"{row1.get('tran_code') or row1.get('tran_code__c')} {row1.get('local_tran_key') or row1.get('lw_tran_id__c')}")
     
     print(f"Unmatched rows in Table 2: {len(unmatched_rows_df2)}")
     for row2 in unmatched_rows_df2:
-        print(f"{row2['tran_code']} {row2['local_tran_key']}")
+        print(f"{row2.get('tran_code') or row2.get('tran_code__c')} {row2.get('local_tran_key') or row2.get('lw_tran_id__c')}")
     
     print(f"Matched rows: {len(matched_rows)}")
     # for row1, row2 in matched_rows:

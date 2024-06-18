@@ -12,7 +12,7 @@ src_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(src_dir)
 
 # native
-from application.engines import StraightThruTransactionProcessingEngine, LWTransactionSummaryEngine
+from application.engines import StraightThruTransactionProcessingEngine, LWTransactionSummaryEngine, LWAPX2SFTransactionEngine
 from application.event_handlers import TransactionEventHandler
 from application.repositories import (
     TransactionNameRepository, TransactionSectionAndStmtTranRepository, 
@@ -24,6 +24,7 @@ from infrastructure.in_memory_repositories import (
     APXDBvPortfolioInMemoryRepository, APXDBvPortfolioSettingExInMemoryRepository, 
     APXDBvPortfolioBaseInMemoryRepository, APXDBvPortfolioBaseCustomInMemoryRepository, APXDBvPortfolioBaseSettingExInMemoryRepository,
     APXDBvCurrencyInMemoryRepository, APXDBvCustodianInMemoryRepository,
+    APXDBvFXRateInMemoryRepository,
 )
 from infrastructure.sql_repositories import (
     MGMTDBHeartbeatRepository, 
@@ -70,7 +71,7 @@ def main():
                 # CoreDBLWTransactionSummaryRepository(),
                 COREDBLWTxnSummaryRepository(),
             ],
-            target_queue_repos = [],
+            target_queue_repos = [COREDBAPX2SFTxnQueueRepository()],
             source_txn_repo = CoreDBTransactionActivityRepository(),
             dividends_repo = APXDBDividendRepository(),
             preprocessing_supplementary_repos = [
@@ -94,6 +95,18 @@ def main():
                 TransactionOtherPostSupplementRepository(),
                 TransactionCashflowRepository(),
             ]
+        ),
+        LWAPX2SFTransactionEngine(
+            source_queue_repo = COREDBAPX2SFTxnQueueRepository(),
+            target_txn_repos = [
+                COREDBSFTransactionRepository(),
+            ],
+            target_queue_repos = [],
+            source_txn_repo = COREDBLWTxnSummaryRepository(),
+                preprocessing_supplementary_repos = [
+                    APXDBvPortfolioBaseSettingExInMemoryRepository(),
+                ],
+            fx_rate_repo = APXDBvFXRateInMemoryRepository(),
         ),
     ]
 

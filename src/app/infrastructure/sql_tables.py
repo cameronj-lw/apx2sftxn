@@ -174,17 +174,19 @@ class APXDBvFXRateView(BaseTable):
 	schema = 'AdvApp'
 	table_name = 'vFXRate'
 
-	def read(self, NumeratorCurrCode=None, DenominatorCurrCode=None, AsOfDate=None):
+	def read(self, PriceDate=None, NumeratorCurrencyCode=None, DenominatorCurrencyCode=None, AsOfDate=None):
 		"""
 		Read all entries, optionally with criteria
 
 		:return: DataFrame
 		"""
 		stmt = sql.select(self.table_def)
-		if NumeratorCurrCode is not None:
-			stmt = stmt.where(self.c.NumeratorCurrCode == NumeratorCurrCode)
-		if DenominatorCurrCode is not None:
-			stmt = stmt.where(self.c.DenominatorCurrCode == DenominatorCurrCode)
+		if PriceDate is not None:
+			stmt = stmt.where(self.c.PriceDate == PriceDate)
+		if NumeratorCurrencyCode is not None:
+			stmt = stmt.where(self.c.NumeratorCurrencyCode == NumeratorCurrencyCode)
+		if DenominatorCurrencyCode is not None:
+			stmt = stmt.where(self.c.DenominatorCurrencyCode == DenominatorCurrencyCode)
 		if AsOfDate is not None:
 			stmt = stmt.where(self.c.AsOfDate == AsOfDate)
 		return self.execute_read(stmt)
@@ -208,6 +210,54 @@ class APXDBvCustodianView(BaseTable):
 
 
 """ APXREPDB """
+
+
+class APXRepDBvStmtGroupByPortfolioView(BaseTable):
+	# TODO_CLEANUP: remove this once not used
+	config_section = 'apxrepdb'
+	schema = 'dbo'
+	table_name = 'vStmtGroupByPortfolio'
+
+	def read(self, PortfolioID=None, PortfolioCode=None, PortfolioGroupID=None, PortfolioGroupCode=None):
+		"""
+		Read all entries, optionally with criteria
+
+		:return: DataFrame
+		"""
+		stmt = sql.select(self.table_def)
+		if PortfolioID is not None:
+			stmt = stmt.where(self.c.PortfolioID == PortfolioID)
+		if PortfolioCode is not None:
+			stmt = stmt.where(self.c.PortfolioCode == PortfolioCode)
+		if PortfolioGroupID is not None:
+			stmt = stmt.where(self.c.PortfolioGroupID == PortfolioGroupID)
+		if PortfolioGroupCode is not None:
+			stmt = stmt.where(self.c.PortfolioGroupCode == PortfolioGroupCode)
+		return self.execute_read(stmt)
+
+
+class APXRepDBvPortfolioAndStmtGroupCurrencyView(BaseTable):
+	config_section = 'apxrepdb'
+	schema = 'dbo'
+	table_name = 'vPortfolioAndStmtGroupCurrency'
+
+	def read(self, PortfolioID=None, PortfolioCode=None, PortfolioGroupID=None, PortfolioGroupCode=None):
+		"""
+		Read all entries, optionally with criteria
+
+		:return: DataFrame
+		"""
+		stmt = sql.select(self.table_def)
+		if PortfolioID is not None:
+			stmt = stmt.where(self.c.PortfolioID == PortfolioID)
+		if PortfolioCode is not None:
+			stmt = stmt.where(self.c.PortfolioCode == PortfolioCode)
+		if PortfolioGroupID is not None:
+			stmt = stmt.where(self.c.PortfolioGroupID == PortfolioGroupID)
+		if PortfolioGroupCode is not None:
+			stmt = stmt.where(self.c.PortfolioGroupCode == PortfolioGroupCode)
+		return self.execute_read(stmt)
+
 
 class APXRepDBLWTxnSummaryTable(ScenarioTable):
 	config_section = 'apxrepdb'
@@ -346,11 +396,27 @@ class LWDBAPXAppraisalTable_uatlwdb(ScenarioTable):
 		return self.execute_read(stmt)
 
 
-""" COREDB """
-
-class COREDBSFTransactionTable(ScenarioTable):
-	config_section = 'coredb'
+class LWDBSFTransactionTable(BaseTable):
+	config_section = 'lwdb'
 	table_name = 'sf_transaction'
+
+	def read(self, portfolio_code=None, from_date=None, to_date=None):
+		"""
+		Read all entries, optionally with criteria
+
+		:return: DataFrame
+		"""
+		stmt = sql.select(self.table_def)
+		if portfolio_code is not None:
+			stmt = stmt.where(self.c.portfolio_code == portfolio_code)
+		if from_date is not None:
+			stmt = stmt.where(self.c.trade_date__c >= from_date) if to_date else stmt.where(self.c.trade_date__c == from_date)
+		if to_date is not None:
+			stmt = stmt.where(self.c.trade_date__c <= to_date) if from_date else stmt.where(self.c.trade_date__c == to_date)
+		return self.execute_read(stmt)
+
+
+""" COREDB """
 
 	
 class COREDBAPXfTransactionActivityQueueTable(BaseTable):
@@ -398,6 +464,27 @@ class COREDBAPXfRealizedGainLossQueueTable(BaseTable):
 class COREDBLWTransactionSummaryQueueTable(BaseTable):
 	config_section = 'coredb'
 	table_name = 'lw_transaction_summary_queue'
+
+	def read(self, portfolio_code=None, trade_date=None, queue_status=None):
+		"""
+		Read all entries, optionally with criteria
+
+		:return: DataFrame
+		"""
+		stmt = sql.select(self.table_def)
+		if portfolio_code is not None:
+			stmt = stmt.where(self.c.portfolio_code == portfolio_code)
+		if trade_date is not None:
+			stmt = stmt.where(self.c.trade_date == trade_date)
+		if queue_status is not None:
+			stmt = stmt.where(self.c.queue_status == queue_status)
+		stmt = stmt.order_by(self.c.trade_date).order_by(self.c.portfolio_code)
+		return self.execute_read(stmt)
+
+	
+class COREDBAPX2SFTxnQueueTable(BaseTable):
+	config_section = 'coredb'
+	table_name = 'lw_apx2sf_txn_queue'
 
 	def read(self, portfolio_code=None, trade_date=None, queue_status=None):
 		"""
@@ -469,7 +556,6 @@ class COREDBAPXfTransactionActivityTable(BaseTable):
 
 class COREDBLWTxnSummaryTable(BaseTable):
 	config_section = 'coredb'
-	schema = 'dbo'
 	table_name = 'LW_txn_summary'
 
 	def read(self, portfolio_code=None, from_date=None, to_date=None):
@@ -505,6 +591,42 @@ class COREDBLWTransactionSummaryTable(BaseTable):
 			stmt = stmt.where(self.c.portfolio_code == portfolio_code)
 		if trade_date is not None:
 			stmt = stmt.where(self.c.trade_date == trade_date)
+		return self.execute_read(stmt)
+
+
+class COREDBSFTransactionTable(BaseTable):
+	config_section = 'coredb'
+	table_name = 'sf_transaction'
+
+	def read(self, portfolio_code=None, from_date=None, to_date=None):
+		"""
+		Read all entries, optionally with criteria
+
+		:return: DataFrame
+		"""
+		stmt = sql.select(self.table_def)
+		if portfolio_code is not None:
+			stmt = stmt.where(self.c.portfolio_code == portfolio_code)
+		if from_date is not None:
+			stmt = stmt.where(self.c.trade_date__c >= from_date) if to_date else stmt.where(self.c.trade_date__c == from_date)
+		if to_date is not None:
+			stmt = stmt.where(self.c.trade_date__c <= to_date) if from_date else stmt.where(self.c.trade_date__c == to_date)
+		return self.execute_read(stmt)
+
+
+class CoreDBSFPortfolioLatestView(BaseTable):
+	config_section = 'coredb'
+	table_name = 'sf_portfolio_latest'
+
+	def read(self, LW_Portfolio_ID__c=None):
+		"""
+		Read all entries, optionally with criteria
+
+		:return: DataFrame
+		"""
+		stmt = sql.select(self.table_def)
+		if LW_Portfolio_ID__c is not None:
+			stmt = stmt.where(self.c.LW_Portfolio_ID__c == LW_Portfolio_ID__c)
 		return self.execute_read(stmt)
 
 

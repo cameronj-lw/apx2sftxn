@@ -8,11 +8,13 @@ from typing import Any, Dict, List, Tuple, Type, Union
 # native
 from domain.models import PKColumnMapping, Transaction
 from domain.repositories import SupplementaryRepository
-from infrastructure.sql_procs import APXRepDBpAPXReadSecurityHashProc, APXRepDBpReadvPortfolioBaseSettingExProc
+from infrastructure.sql_procs import APXRepDBpAPXReadSecurityHashProc
 from infrastructure.sql_tables import (
     APXDBvPortfolioView, APXDBvPortfolioBaseView, APXDBvPortfolioBaseCustomView, APXDBvPortfolioSettingExView, APXDBvPortfolioBaseSettingExView, 
     APXDBvCurrencyView, APXDBvSecurityView, APXDBvFXRateView, APXDBvCustodianView,
     COREDBAPXfRealizedGainLossTable,
+    APXRepDBvStmtGroupByPortfolioView, APXRepDBvPortfolioAndStmtGroupCurrencyView, 
+    CoreDBSFPortfolioLatestView,
 )
 from infrastructure.util.dataframe import df_to_dict
 from infrastructure.util.stored_proc import BaseStoredProc
@@ -41,7 +43,7 @@ class InMemoryRepository(SupplementaryRepository):
         return self.current_data.get(composite_pk_values)
 
     def _get_composite_pk_values(self, data: Dict[str, Any]) -> Tuple:
-        # Build composite PK values
+        # Build composite PK values, as a tuple
         values = ()
         for m in self.pk_columns:
             values += (data.get(m.supplementary_column_name),)
@@ -211,10 +213,29 @@ class APXDBvSecurityInMemoryRepository(InMemorySingletonSQLRepository):
 class APXDBvFXRateInMemoryRepository(InMemorySingletonSQLRepository):
     def __init__(self):
         super().__init__(pk_columns=[
-                            PKColumnMapping('TradeDate', 'AsOfDate'),
-                            PKColumnMapping('NumeratorCurrCode'), 
-                            PKColumnMapping('DenominatorCurrCode'),
+                            PKColumnMapping('TradeDate', 'PriceDate'),
+                            PKColumnMapping('NumeratorCurrCode', 'NumeratorCurrencyCode'), 
+                            PKColumnMapping('DenominatorCurrCode', 'DenominatorCurrencyCode'),
                         ], sql_source=APXDBvFXRateView)
+
+    def refresh(self, params: Dict={}):
+        """ Avoid refreshing if no criteria are provided """
+        if params.get('PriceDate'):
+            super().refresh(params=params)
+        else:
+            # Since the view contains many FX rates for every day, refreshing without specifying a date is not feasible
+            pass  # TODO_EH: any logging or other behaviour desired here?
+
+    def get(self, pk_column_values: Dict[str, Any]) -> dict:
+        # First, try to get values from existing in-memory:
+        get_res = super().get(pk_column_values=pk_column_values)
+        if get_res and len(get_res):
+            # If we got data, return it.
+            return get_res
+        else:
+            # If no data, refresh and then try:
+            self.refresh(params=pk_column_values)
+            return super().get(pk_column_values=pk_column_values)
 
 class APXDBvCustodianInMemoryRepository(InMemorySingletonSQLRepository):
     def __init__(self):
@@ -226,6 +247,22 @@ class APXDBvCustodianInMemoryRepository(InMemorySingletonSQLRepository):
         super().supplement(transaction)
         if transaction.CustodianName:
             transaction.CustodianName = f"{transaction.CustodianName} ({int(transaction.CustodianID)})"
+
+class APXRepDBvStmtGroupByPortfolioInMemoryRepository(InMemorySingletonSQLRepository):
+    def __init__(self):
+        super().__init__(pk_columns=[PKColumnMapping('PortfolioCode')], sql_source=APXRepDBvStmtGroupByPortfolioView
+                            , relevant_columns=['PortfolioGroupISOCode'])
+
+class APXRepDBvPortfolioAndStmtGroupCurrencyInMemoryRepository(InMemorySingletonSQLRepository):
+    def __init__(self):
+        super().__init__(pk_columns=[PKColumnMapping('PortfolioCode')], sql_source=APXRepDBvPortfolioAndStmtGroupCurrencyView
+                            , relevant_columns=['PortfolioISOCode', 'PortfolioGroupISOCode'])
+
+
+class CoreDBSFPortfolioLatestInMemoryRepository(InMemorySingletonSQLRepository):
+    def __init__(self):
+        super().__init__(pk_columns=[PKColumnMapping('PortfolioCode', 'LW_Portfolio_ID__c')], sql_source=CoreDBSFPortfolioLatestView
+                            , relevant_columns=['PortfolioCurrencyISOCode', 'StatementGroupCurrencyISOCode'])
 
 
 class CoreDBRealizedGainLossInMemoryRepository(InMemorySingletonSQLRepository):
@@ -263,3 +300,28 @@ class CoreDBRealizedGainLossInMemoryRepository(InMemorySingletonSQLRepository):
 
 
 
+
+class APXDBFXRatesByPortfolioAndTradeDateRepository(InMemoryRepository):
+    """ Combine multiple in-memory repositories for ease of use """
+    currency_repo = APXDBvCurrencyInMemoryRepository()
+    fx_rate_repo = APXDBvFXRateInMemoryRepository()
+
+    def __init__(self):
+        super().__init__(pk_columns=[
+            PKColumnMapping('PortfolioCode'),
+            PKColumnMapping('TradeDate'),
+        ])
+
+    def create(self, data: Dict[str, Any]) -> int:
+        raise NotImplementedError(f'Cannot create to {self.cn}!')
+
+    def get(self, pk_column_values: Dict[str, Any]) -> dict:
+        pass  # TODO: implement
+
+    def supplement(self, transaction: Transaction) -> Union[Dict, None]:
+        pass  # TODO: implement (or remove if same as domain base class?)
+
+    def _get_supplemental_data(self, transaction: Transaction) -> Union[Dict, None]:
+        # Assumption: the Transaction already has a ReportingCurrencyCode, which is the portfolio currency
+        # Take the ReportingCurrencyCode and get the 
+        pass

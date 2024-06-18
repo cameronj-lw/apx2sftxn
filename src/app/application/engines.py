@@ -746,6 +746,100 @@ class LWTransactionSummaryEngine(TransactionProcessingEngine):
         return f'LW-Transaction-Summary-Engine'
 
 
+@dataclass
+class LWAPX2SFTransactionEngine(TransactionProcessingEngine):
+    """ Generate txns for sending to SF. See http://lwweb/wiki/bin/view/Systems/ApxSmes/APXToSFTXN """
+    source_txn_repo: TransactionRepository  # We'll initially pull the transactions from here
+    preprocessing_supplementary_repos: List[SupplementaryRepository]  # We'll supplement with data from these
+    fx_rate_repo: SupplementaryRepository  # We'll use this to get the portf2firm currency FX rate (if different)
+
+    def preprocessing_supplement(self, transactions: List[Transaction]):
+        # Supplement with "pre-processing" supplementary repos, to get additional fields
+        for txn in transactions:
+            txn.trade_date_original = txn.TradeDate  # Since for dividends, we may change the TradeDate later
+            for sr in self.preprocessing_supplementary_repos:
+                sr.supplement(txn)
+
+    def get_portfolio2firm_fx_rate(self, txn: Transaction):
+        # Query provided repo for these values
+        pk_column_values = {
+            'PriceDate'                 : txn.TradeDate.date(),
+            'NumeratorCurrencyCode'     : 'ca',  # Because it's the firm currency (CAD)
+            'DenominatorCurrencyCode'   : txn.ReportingCurrencyCode,
+        }   
+        print(pk_column_values)
+        get_res = self.fx_rate_repo.get(pk_column_values=pk_column_values)
+        print(get_res)
+
+        return get_res.get('SpotRate')
+
+    def assign_tradedate_settledate_dt(self, txn: Transaction):
+        # apx2sf.pl line 2788-2793
+        txn.TradeDateDT = txn.TradeDate
+        txn.SettleDateDT = txn.SettleDate
+
+    def assign_cash_flow_local(self, txn: Transaction):
+        # apx2sf.pl line 2857-2865
+        if txn.TransactionCode in ('by'):
+            txn.CashFlowLocal = -1.0 * txn.TradeAmountLocal
+        else:
+            txn.CashFlowLocal = txn.TradeAmountLocal
+
+    def assign_trade_amt_cash_flow_firm_ccy(self, txn: Transaction, portfolio2firm_fx_rate: float):
+        # apx2sf.pl line 2916-2944: Assign TradeAmount & CashFlow in firm ccy
+        for attr in ('TradeAmount', 'CashFlow'):
+            if portf_ccy_attr_val := getattr(txn, attr, None):
+                firm_ccy_val = portf_ccy_attr_val * portfolio2firm_fx_rate
+                setattr(txn, f'{attr}Firm', firm_ccy_val)
+
+    
+    def process(self, queue_item: TransactionProcessingQueueItem) -> List[Transaction]:
+        logging.info(f'{self.cn} processing {queue_item}')
+        
+        source_transactions = self.source_txn_repo.get(portfolio_code=queue_item.portfolio_code, trade_date=queue_item.trade_date)
+        transactions = source_transactions.copy()
+        logging.info(f'{self.cn} found {len(transactions)} transactions from {self.source_txn_repo.cn}')
+
+        # Supplement with specified repo(s)
+        self.preprocessing_supplement(transactions)
+
+        # We'll read FX rate once rather than for every txn, for performance:
+        portfolio2firm_fx_rate = None
+
+        # Loop through transactions
+        for txn in transactions:
+            if not portfolio2firm_fx_rate:
+                portfolio2firm_fx_rate = self.get_portfolio2firm_fx_rate(txn)
+
+            self.assign_tradedate_settledate_dt(txn)
+
+            # apx2sf.pl line 2803-2856: # not needed as this is already done by LWTransactionSummaryEngine
+            # see null_fields_for_dv, reverse_amount_signs, assign_name4stmt_for_client_wd_dp, unassign_gains_proceeds_quantity_if_zero, assign_cash_flow
+
+            self.assign_cash_flow_local(txn)
+
+            # apx2sf.pl line 2876-2881: Check for APX vs SF mismatch in portfolio currency
+            if (apx_portf_ccy_iso := getattr(txn, 'PortfolioISOCode', None)) and (sf_portf_ccy_iso := getattr(txn, 'PortfolioCurrencyISOCode', None)):
+                if apx_portf_ccy_iso != sf_group_ccy_iso:
+                    warn_msg = f'{txn.PortfolioCode} ({apx_portf_ccy_iso}): APX vs SF MISMATCH on portfolio reporting currency, using SF ({sf_portf_ccy_iso})'
+                    logging.error(warn_msg)
+                    # TODO_EH: further error handling here? 
+
+            # apx2sf.pl line 2892-2897: Check for APX vs SF mismatch in stmt group currency
+            if (apx_group_ccy_iso := getattr(txn, 'PortfolioGroupISOCode', None)) and (sf_group_ccy_iso := getattr(txn, 'StatementGroupCurrencyISOCode', None)):
+                if apx_group_ccy_iso != sf_group_ccy_iso:
+                    warn_msg = f'{txn.PortfolioCode} ({apx_group_ccy_iso}): APX vs SF MISMATCH on stmt group reporting currency, using SF ({sf_group_ccy_iso})'
+                    logging.error(warn_msg)
+                    # TODO_EH: further error handling here? 
+
+            self.assign_trade_amt_cash_flow_firm_ccy(txn, portfolio2firm_fx_rate)
+
+        # Now we have processed the transactions. Return them:
+        return transactions
+
+    def __str__(self):
+        return f'LW-APX2SF-Transaction-Engine'
+
 
 
 

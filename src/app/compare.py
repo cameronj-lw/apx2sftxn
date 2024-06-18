@@ -14,7 +14,7 @@ sys.path.append(src_dir)
 from domain.models import TransactionProcessingQueueItem
 
 # native
-from application.engines import StraightThruTransactionProcessingEngine, LWTransactionSummaryEngine
+from application.engines import StraightThruTransactionProcessingEngine, LWTransactionSummaryEngine, LWAPX2SFTransactionEngine
 from application.event_handlers import TransactionEventHandler
 from application.repositories import (
     TransactionNameRepository, TransactionSectionAndStmtTranRepository, 
@@ -26,6 +26,7 @@ from infrastructure.in_memory_repositories import (
     APXDBvPortfolioInMemoryRepository, APXDBvPortfolioSettingExInMemoryRepository, 
     APXDBvPortfolioBaseInMemoryRepository, APXDBvPortfolioBaseCustomInMemoryRepository, APXDBvPortfolioBaseSettingExInMemoryRepository,
     APXDBvCurrencyInMemoryRepository, APXDBvCustodianInMemoryRepository,
+    APXDBvFXRateInMemoryRepository,
 )
 from infrastructure.sql_repositories import (
     MGMTDBHeartbeatRepository, 
@@ -35,12 +36,16 @@ from infrastructure.sql_repositories import (
     CoreDBRealizedGainLossSupplementaryRepository,
     APXRepDBLWTxnSummaryRepository, COREDBLWTxnSummaryRepository,
     APXDBDividendRepository,
+    COREDBAPX2SFTxnQueueRepository, COREDBSFTransactionRepository
 )
 from infrastructure.util.config import AppConfig
 from infrastructure.util.logging import setup_logging
 
 
-from infrastructure.sql_tables import COREDBLWTxnSummaryTable, APXRepDBLWTxnSummaryTable
+from infrastructure.sql_tables import (
+    COREDBLWTxnSummaryTable, APXRepDBLWTxnSummaryTable,
+    COREDBSFTransactionTable, LWDBSFTransactionTable,
+)
 from infrastructure.util.dataframe import compare_dataframes
 
 
@@ -62,11 +67,18 @@ def main():
 
     # Define columns for matching and exclusion
     match_columns = ['portfolio_code', 'trade_date', 'name4stmt', 'quantity']
-    match_columns = ['local_tran_key']
-    exclude_columns = ['record_id', 'scenario', 'data_handle', 'asofdate', 'asofuser', 'scenariodate', 'computer', 'trade_date_original']
-    tolerances = {'fx_rate': 0.000051}
+    match_columns = ['local_tran_key']  # for testing LW txn summary
+    match_columns = ['lw_tran_id__c']  # for testing APX2SFTxn
+    exclude_columns = ['record_id', 'scenario', 'data_handle', 'asofdate', 'asofuser', 'scenariodate', 'computer'
+        , 'lw_id', 'trade_date_original', 'portfolio_id'
+        , 'gendate', 'moddate', 'genuser', 'moduser'
+    ]
+    tolerances = {'fx_rate': 0.000051, 'commission': 0.005}
     
     if not args.portfolio_code:
+        # df1 = COREDBLWTxnSummaryTable().read(from_date=args.from_date, to_date=args.to_date)
+        # df2 = APXRepDBLWTxnSummaryTable().read(scenario='BASE', data_handle='37020804B005458B874D74434DBCD0A0', from_date=args.from_date, to_date=args.to_date)
+
         df1 = COREDBLWTxnSummaryTable().read(from_date=args.from_date, to_date=args.to_date)
         df2 = APXRepDBLWTxnSummaryTable().read(scenario='BASE', data_handle='37020804B005458B874D74434DBCD0A0', from_date=args.from_date, to_date=args.to_date)
 
@@ -92,12 +104,12 @@ def main():
                 source_txn_repo = APXDBTransactionActivityRepository(),
             ),
             LWTransactionSummaryEngine(
-                source_queue_repo = None,
+                source_queue_repo = CoreDBLWTransactionSummaryQueueRepository(),
                 target_txn_repos = [
                     # CoreDBLWTransactionSummaryRepository(),
                     COREDBLWTxnSummaryRepository(),
                 ],
-                target_queue_repos = [],
+                target_queue_repos = [COREDBAPX2SFTxnQueueRepository()],
                 source_txn_repo = CoreDBTransactionActivityRepository(),
                 dividends_repo = APXDBDividendRepository(),
                 preprocessing_supplementary_repos = [
@@ -115,13 +127,25 @@ def main():
                 ],
                 prev_bday_cost_repo = LWDBAPXAppraisalPrevBdayRepository(),
                 postprocessing_supplementary_repos = [
-                    # TODO_LAYERS: should these logics just be part of the engine? 
-                    # TransactionNameRepository(),
-                    # TransactionSectionAndStmtTranRepository(),
-                    # TransactionOtherPostSupplementRepository(),
-                    # TransactionCashflowRepository(),
+                    # TODO_LAYERS: should these logics just be part of the engine?
+                    TransactionNameRepository(),
+                    TransactionSectionAndStmtTranRepository(),
+                    TransactionOtherPostSupplementRepository(),
+                    TransactionCashflowRepository(),
                 ]
             ),
+            # LWAPX2SFTransactionEngine(
+            #     source_queue_repo = COREDBAPX2SFTxnQueueRepository(),
+            #     target_txn_repos = [
+            #         COREDBSFTransactionRepository(),
+            #     ],
+            #     target_queue_repos = [],
+            #     source_txn_repo = COREDBLWTxnSummaryRepository(),
+            #     preprocessing_supplementary_repos = [
+            #         APXDBvPortfolioBaseSettingExInMemoryRepository(),
+            #     ],
+            #     fx_rate_repo = APXDBvFXRateInMemoryRepository(),
+            # ),
         ]
     else:
         engines = []
@@ -136,12 +160,15 @@ def main():
                 print(f'{datetime.datetime.now()}: Creating transactions in {repo.cn}...')
                 create_res = repo.create(transactions=result)
 
-        df1 = COREDBLWTxnSummaryTable().read(portfolio_code=pc, from_date=args.from_date, to_date=args.to_date)
-        if args.from_date == datetime.date(2024, 4, 8):
-            df2 = APXRepDBLWTxnSummaryTable().read(scenario='BASE', data_handle='8328CB5AC1CB40E083F0DA4EE0DAC2BD', portfolio_code=pc, from_date=args.from_date, to_date=args.to_date)
-        else:
-            df2 = APXRepDBLWTxnSummaryTable().read(scenario='BASE', data_handle='37020804B005458B874D74434DBCD0A0', portfolio_code=pc, from_date=args.from_date, to_date=args.to_date)
+        # df1 = COREDBLWTxnSummaryTable().read(portfolio_code=pc, from_date=args.from_date, to_date=args.to_date)
+        # if args.from_date == datetime.date(2024, 4, 8):
+        #     df2 = APXRepDBLWTxnSummaryTable().read(scenario='BASE', data_handle='8328CB5AC1CB40E083F0DA4EE0DAC2BD', portfolio_code=pc, from_date=args.from_date, to_date=args.to_date)
+        # else:
+        #     df2 = APXRepDBLWTxnSummaryTable().read(scenario='BASE', data_handle='37020804B005458B874D74434DBCD0A0', portfolio_code=pc, from_date=args.from_date, to_date=args.to_date)
     
+        df1 = COREDBSFTransactionTable().read(portfolio_code=pc, from_date=args.from_date, to_date=args.to_date)
+        df2 = LWDBSFTransactionTable().read(portfolio_code=pc, from_date=args.from_date, to_date=args.to_date)
+
         print(f"\n\n\n{datetime.datetime.now()}: ===== {pc} =====\n")
 
         # Call the function to compare dataframes

@@ -1,5 +1,6 @@
 
 # core python
+from abc import abstractmethod
 import datetime
 import logging
 import os
@@ -18,12 +19,12 @@ from infrastructure.models import MGMTDBHeartbeat, Txn2TableColMap
 from infrastructure.sql_procs import APXDBRealizedGainLossProcAndFunc, APXDBTransactionActivityProcAndFunc
 from infrastructure.sql_tables import (
     APXRepDBLWTxnSummaryTable,
-    MGMTDBMonitorTable, 
-    COREDBSFTransactionTable, 
+    MGMTDBMonitorTable,      
     COREDBAPXfRealizedGainLossQueueTable, COREDBAPXfRealizedGainLossTable, 
     COREDBAPXfTransactionActivityQueueTable, COREDBAPXfTransactionActivityTable, 
-    COREDBLWTransactionSummaryQueueTable, LWDBAPXAppraisalTable, COREDBLWTransactionSummaryTable,
-    COREDBLWTxnSummaryTable,
+    COREDBLWTransactionSummaryQueueTable, LWDBAPXAppraisalTable, COREDBLWTransactionSummaryTable, COREDBLWTxnSummaryTable,
+    COREDBAPX2SFTxnQueueTable, COREDBSFTransactionTable,
+    # LWDBSFPortfolioTable,
 )
 from infrastructure.util.date import get_previous_bday
 from infrastructure.util.math import normal_round
@@ -129,6 +130,54 @@ class LWDBAPXAppraisalPrevBdayRepository(SupplementaryRepository):
         # Additionally, update the transaction's per-unit values:
         transaction.LocalCostBasis = transaction.LocalCostPerUnit * transaction.Quantity
         transaction.RptCostBasis = transaction.RptCostPerUnit * transaction.Quantity
+
+
+# TODO: implement below class, or remove
+# class LWDBSFPortfolioRepository(SupplementaryRepository):
+#     table = LWDBSFPortfolioTable()
+#     readable_name = self.table.readable_name
+#     relevant_columns = ['data_dt', 'portfolio_code', 'SecurityID', 'LocalCostPerUnit', 'RptCostPerUnit']
+
+#     def __init__(self):
+#         super().__init__(pk_columns=[
+#                 PKColumnMapping('TradeDate'), 
+#                 PKColumnMapping('portfolio_code', 'PortfolioCode'),
+#                 PKColumnMapping('SecurityID1', 'SecurityID'),
+#             ])
+    
+#     def create(self, data: Dict[str, Any]) -> int:
+#         raise NotImplementedError(f'Cannot save to {self.cn}!') 
+
+#     def get(self, pk_column_values: Dict[str, Any]) -> dict:
+#         # We want to get appraisal data from prev bday before TradeDate:
+#         trade_date = pk_column_values.get('TradeDate')
+#         prev_bday = get_previous_bday(trade_date)
+
+#         # Query table
+#         res_df = self.table.read(data_dt=prev_bday, PortfolioCode=pk_column_values.get('PortfolioCode'), SecurityID=pk_column_values.get('SecurityID'))
+#         res_df['portfolio_code'] = res_df['PortfolioCode']
+        
+#         # Add calculated columns
+#         res_df['LocalCostPerUnit'] = res_df['LocalUnadjustedCostBasis'] / res_df['Quantity']
+#         res_df['RptCostPerUnit'] = res_df['UnadjustedCostBasis'] / res_df['Quantity']
+#         res_dicts = res_df[self.relevant_columns].to_dict('records')
+
+#         # Should be 1 row max... sanity check... # TODO_EH: what if this has more than one row?
+#         if len(res_dicts) > 1: 
+#             logging.info(f"Found multiple rows in {self.table.cn} for {prev_bday} {pk_column_values.get('PortfolioCode')} {pk_column_values.get('SecurityID')}!")
+#             return res_dicts[0]
+#         elif len(res_dicts):
+#             return res_dicts[0]
+#         else:
+#             logging.info(f"Found 0 rows in {self.table.cn} for {prev_bday} {pk_column_values.get('PortfolioCode')} {pk_column_values.get('SecurityID')}!")
+#             return {}
+
+#     def supplement(self, transaction: Transaction):
+#         super().supplement(transaction)
+
+#         # Additionally, update the transaction's per-unit values:
+#         transaction.LocalCostBasis = transaction.LocalCostPerUnit * transaction.Quantity
+#         transaction.RptCostBasis = transaction.RptCostPerUnit * transaction.Quantity
 
 """ APXDB """
 
@@ -371,133 +420,69 @@ class APXRepDBLWTxnSummaryRepository(TransactionRepository):
 
 """ COREDB """
 
-class CoreDBRealizedGainLossQueueRepository(TransactionProcessingQueueRepository):
+class CoreDBTransactionProcessingQueueRepository(TransactionProcessingQueueRepository):
+    """ Base class for all CoreDB queues, since the subclasses would have similar/identical implementations """
+    
+    """ Subclasses must specify a table """
+    @property
+    @abstractmethod
+    def table(self):
+        pass
+
+    def create(self, queue_item: TransactionProcessingQueueItem) -> int:
+        current = self.table.read(queue_status=queue_item.queue_status.name, portfolio_code=queue_item.portfolio_code
+                                    , trade_date=queue_item.trade_date)
+        if len(current):
+            # Nothing to do ... it already has the desired status.
+            # We consider this a success and therefore return 1:
+            return 1  
+        else:
+            # TODO_EH: try-catch for SQL error?
+            insert_res = self.table.execute_insert(data={
+                'portfolio_code': queue_item.portfolio_code,
+                'trade_date': queue_item.trade_date,
+                'queue_status': queue_item.queue_status.name,
+                'modified_by': os.environ.get('APP_NAME'),
+                'modified_at': datetime.datetime.now(),
+            })
+            return insert_res.rowcount
+
+    def update_queue_status(self, queue_item: TransactionProcessingQueueItem, old_queue_status: Union[QueueStatus,None]=None) -> int:
+        # Build update stmt
+        stmt = sql.update(self.table.table_def)
+        stmt = stmt.values(queue_status=queue_item.queue_status.name)
+        stmt = stmt.where(self.table.c.portfolio_code == queue_item.portfolio_code)
+        stmt = stmt.where(self.table.c.trade_date == queue_item.trade_date)
+        stmt = stmt.where(self.table.c.queue_status == old_queue_status.name)
+
+        # Execute write
+        update_res = self.table.execute_write(stmt)
+
+        # Return rowcount
+        return update_res.rowcount
+
+    def get(self, portfolio_code: Union[str,None]=None, trade_date: Union[datetime.date,None]=None
+                , queue_status: Union[QueueStatus,None]=None) -> List[TransactionProcessingQueueItem]:
+        res_df = self.table.read(portfolio_code=portfolio_code, trade_date=trade_date, queue_status=queue_status.name)
+        res_queue_items = [TransactionProcessingQueueItem(portfolio_code=r['portfolio_code'], trade_date=r['trade_date']
+                            , queue_status=QueueStatus.from_value(r['queue_status'])) for r in res_df.to_dict('records')]
+        return res_queue_items
+
+
+class CoreDBRealizedGainLossQueueRepository(CoreDBTransactionProcessingQueueRepository):
     table = COREDBAPXfRealizedGainLossQueueTable()
 
-    def create(self, queue_item: TransactionProcessingQueueItem) -> int:
-        current = self.table.read(queue_status=queue_item.queue_status.name, portfolio_code=queue_item.portfolio_code
-                                    , trade_date=queue_item.trade_date)
-        if len(current):
-            # Nothing to do ... it already has the desired status.
-            # We consider this a success and therefore return 1:
-            return 1  
-        else:
-            # TODO_EH: try-catch for SQL error?
-            insert_res = self.table.execute_insert(data={
-                'portfolio_code': queue_item.portfolio_code,
-                'trade_date': queue_item.trade_date,
-                'queue_status': queue_item.queue_status.name,
-                'modified_by': os.environ.get('APP_NAME'),
-                'modified_at': datetime.datetime.now(),
-            })
-            return insert_res.rowcount
-
-    def update_queue_status(self, queue_item: TransactionProcessingQueueItem, old_queue_status: Union[QueueStatus,None]=None) -> int:
-        # Build update stmt
-        stmt = sql.update(self.table.table_def)
-        stmt = stmt.values(queue_status=queue_item.queue_status.name)
-        stmt = stmt.where(self.table.c.portfolio_code == queue_item.portfolio_code)
-        stmt = stmt.where(self.table.c.trade_date == queue_item.trade_date)
-        stmt = stmt.where(self.table.c.queue_status == old_queue_status.name)
-
-        # Execute write
-        update_res = self.table.execute_write(stmt)
-
-        # Return rowcount
-        return update_res.rowcount
-
-    def get(self, portfolio_code: Union[str,None]=None, trade_date: Union[datetime.date,None]=None
-                , queue_status: Union[QueueStatus,None]=None) -> List[TransactionProcessingQueueItem]:
-        res_df = self.table.read(portfolio_code=portfolio_code, trade_date=trade_date, queue_status=queue_status.name)
-        res_queue_items = [TransactionProcessingQueueItem(portfolio_code=r['portfolio_code'], trade_date=r['trade_date']
-                            , queue_status=QueueStatus.from_value(r['queue_status'])) for r in res_df.to_dict('records')]
-        return res_queue_items
-
-
-class CoreDBTransactionActivityQueueRepository(TransactionProcessingQueueRepository):
+class CoreDBTransactionActivityQueueRepository(CoreDBTransactionProcessingQueueRepository):
     table = COREDBAPXfTransactionActivityQueueTable()
 
-    def create(self, queue_item: TransactionProcessingQueueItem) -> int:
-        current = self.table.read(queue_status=queue_item.queue_status.name, portfolio_code=queue_item.portfolio_code
-                                    , trade_date=queue_item.trade_date)
-        if len(current):
-            # Nothing to do ... it already has the desired status.
-            # We consider this a success and therefore return 1:
-            return 1  
-        else:
-            # TODO_EH: try-catch for SQL error?
-            insert_res = self.table.execute_insert(data={
-                'portfolio_code': queue_item.portfolio_code,
-                'trade_date': queue_item.trade_date,
-                'queue_status': queue_item.queue_status.name,
-                'modified_by': os.environ.get('APP_NAME'),
-                'modified_at': datetime.datetime.now(),
-            })
-            return insert_res.rowcount
 
-    def update_queue_status(self, queue_item: TransactionProcessingQueueItem, old_queue_status: Union[QueueStatus,None]=None) -> int:
-        # Build update stmt
-        stmt = sql.update(self.table.table_def)
-        stmt = stmt.values(queue_status=queue_item.queue_status.name)
-        stmt = stmt.where(self.table.c.portfolio_code == queue_item.portfolio_code)
-        stmt = stmt.where(self.table.c.trade_date == queue_item.trade_date)
-        stmt = stmt.where(self.table.c.queue_status == old_queue_status.name)
-
-        # Execute write
-        update_res = self.table.execute_write(stmt)
-
-        # Return rowcount
-        return update_res.rowcount
-
-    def get(self, portfolio_code: Union[str,None]=None, trade_date: Union[datetime.date,None]=None
-                , queue_status: Union[QueueStatus,None]=None) -> List[TransactionProcessingQueueItem]:
-        res_df = self.table.read(portfolio_code=portfolio_code, trade_date=trade_date, queue_status=queue_status.name)
-        res_queue_items = [TransactionProcessingQueueItem(portfolio_code=r['portfolio_code'], trade_date=r['trade_date']
-                            , queue_status=QueueStatus.from_value(r['queue_status'])) for r in res_df.to_dict('records')]
-        return res_queue_items
-
-
-class CoreDBLWTransactionSummaryQueueRepository(TransactionProcessingQueueRepository):
+class CoreDBLWTransactionSummaryQueueRepository(CoreDBTransactionProcessingQueueRepository):
     table = COREDBLWTransactionSummaryQueueTable()
 
-    def create(self, queue_item: TransactionProcessingQueueItem) -> int:
-        current = self.table.read(queue_status=queue_item.queue_status.name, portfolio_code=queue_item.portfolio_code
-                                    , trade_date=queue_item.trade_date)
-        if len(current):
-            # Nothing to do ... it already has the desired status.
-            # We consider this a success and therefore return 1:
-            return 1  
-        else:
-            # TODO_EH: try-catch for SQL error?
-            insert_res = self.table.execute_insert(data={
-                'portfolio_code': queue_item.portfolio_code,
-                'trade_date': queue_item.trade_date,
-                'queue_status': queue_item.queue_status.name,
-                'modified_by': os.environ.get('APP_NAME'),
-                'modified_at': datetime.datetime.now(),
-            })
-            return insert_res.rowcount
 
-    def update_queue_status(self, queue_item: TransactionProcessingQueueItem, old_queue_status: Union[QueueStatus,None]=None) -> int:
-        # Build update stmt
-        stmt = sql.update(self.table.table_def)
-        stmt = stmt.values(queue_status=queue_item.queue_status.name)
-        stmt = stmt.where(self.table.c.portfolio_code == queue_item.portfolio_code)
-        stmt = stmt.where(self.table.c.trade_date == queue_item.trade_date)
-        stmt = stmt.where(self.table.c.queue_status == old_queue_status.name)
+class COREDBAPX2SFTxnQueueRepository(CoreDBTransactionProcessingQueueRepository):
+    table = COREDBAPX2SFTxnQueueTable()
 
-        # Execute write
-        update_res = self.table.execute_write(stmt)
-
-        # Return rowcount
-        return update_res.rowcount
-
-    def get(self, portfolio_code: Union[str,None]=None, trade_date: Union[datetime.date,None]=None
-                , queue_status: Union[QueueStatus,None]=None) -> List[TransactionProcessingQueueItem]:
-        res_df = self.table.read(portfolio_code=portfolio_code, trade_date=trade_date, queue_status=queue_status.name)
-        res_queue_items = [TransactionProcessingQueueItem(portfolio_code=r['portfolio_code'], trade_date=r['trade_date']
-                            , queue_status=QueueStatus.from_value(r['queue_status'])) for r in res_df.to_dict('records')]
-        return res_queue_items
 
 class CoreDBRealizedGainLossSupplementaryRepository(SupplementaryRepository):
     table = COREDBAPXfRealizedGainLossTable()
@@ -743,89 +728,61 @@ class CoreDBLWTransactionSummaryRepository(TransactionRepository):
 
 class COREDBSFTransactionRepository(TransactionRepository):
     table = COREDBSFTransactionTable()
-    
-    def create(self, transactions: Union[List[Transaction],Transaction]) -> int:
-        # 1. if transaction is a dividend (dv) then blank out the following fields: Quantity, PricePerUnit, CostPerUnit & CostBasis
-        # 2. if transaction is a long-out, withdrawal, management fee, custodian fee or withholding tax (lo, wd, ep, ex, wt) then flip the sign on the TradeAmount
-        # 3. if transaction is a client withdrawal (wd) then change security name to 'CASH WITHDRAWAL'
-        # 4. if transaction is a client deposit (dp) then change security name to 'CASH DEPOSIT'
-        # 5. define new attributes 'CashFlow' and 'CashFlowLocal' to reflect the cash flow impact of the transaction on the portfolio in reporting currency and local currency, respectively.
-            # 5.a. if transaction is a buy then CashFlow = -1* TradeAmount, else CashFlow = TradeAmount
-            # 5.b. if transaction is a buy then CashFlowLocal = -1* TradeAmountLocal, else CashFlowLocal = TradeAmountLocal
-        # 6. Compare the portfolio reporting currency for the transaction as specified in APX vs SF
-            # if there is a mismatch, then {
-            # use the SF reporting currency
-            # create a warning for the transaction (see 'warn_code' and 'warning' in the staging table)
-            # }
-        # 7. Compare the statement group reporting currency for the transaction in APX vs SF
-            # if there is a mismatch, then {
-            # use the SF reporting currency
-            # create a warning for the transaction (see 'warn_code' and 'warning' in the staging table)
-            # }
-        pass  # TODO: implement?
-
-    def get(self, portfolio_code: Union[str,None]=None, trade_date: Union[datetime.date, Tuple[datetime.date, datetime.date], None]=None) -> List[Transaction]:
-        pass
-
-    @classmethod
-    def readable_name(self):
-        return 'COREDB sf_transaction table'
-
-
-class COREDBLWTxnSummaryRepository(TransactionRepository):
-    table = COREDBLWTxnSummaryTable()
+    readable_name = table.readable_name
     txn2table_column_mappings = [
-        # ({transaction attribute}, {table column}, {number of decimal places}, {})
+        # apx2sf.pl @SF_TRANSACTIONS_feed
+        # ({transaction attribute}, {table column}, {txn2table_format_function}, {table2txn_format_function})
+        # In cases where the same txn attribute maps to multiple table columns, the more desirable column should be listed first (higher)
+        # In cases where the same table column maps to multiple txn attributes, the more desirable attribute should be listed first (higher)
+        Txn2TableColMap('TradeDate'        , 'data_dt'),
         Txn2TableColMap('PortfolioCode'    , 'portfolio_code'),
-        Txn2TableColMap('PortfolioName'    , 'portfolio_name'),
-        Txn2TableColMap('TransactionCode'  , 'tran_code'),
-        Txn2TableColMap('TradeDate'        , 'trade_date'),
-        Txn2TableColMap('SettleDate'       , 'settle_date'),
-        Txn2TableColMap('Symbol1'          , 'symbol'),
-        # Txn2TableColMap('Cusip'    , 'cusip'),  # TODO_CLEANUP: seems cusip is always null in current table ... remove once confirmed not needed
-        Txn2TableColMap('Name4Stmt'        , 'name4stmt'),
-        Txn2TableColMap('Quantity'         , 'quantity', 9),
-        Txn2TableColMap('TradeAmount'      , 'trade_amount', 2),
-        Txn2TableColMap('CashFlow'         , 'cash_flow', 2),
-        Txn2TableColMap('BrokerName'       , 'broker_name'),
-        Txn2TableColMap('CustodianName'    , 'custodian_name'),
-        Txn2TableColMap('CustAcctNotify'   , 'cust_acct_notify'),
-        Txn2TableColMap('PricePerUnit'     , 'price_per_unit', 9),
-        Txn2TableColMap('Commission'       , 'commission', 2, populate_none_with_zero=True),
-        Txn2TableColMap('NetInterest'      , 'net_interest', 2, populate_none_with_zero=True),
-        Txn2TableColMap('NetDividend'      , 'net_dividend', 2, populate_none_with_zero=True),
-        Txn2TableColMap('NetFgnIncome'     , 'net_fgn_income', 2, populate_none_with_zero=True),
-        Txn2TableColMap('CapGainsDistrib'  , 'cap_gains_distrib', populate_none_with_zero=True),
-        Txn2TableColMap('TotalIncome'      , 'tot_income', 2, populate_none_with_zero=True),
-        Txn2TableColMap('RealizedGain'     , 'realized_gain', 2, populate_none_with_zero=False),
-        Txn2TableColMap('TfsaContribAmt'   , 'tfsa_contrib_amt', 2, populate_none_with_zero=True),
-        Txn2TableColMap('RspContribAmt'    , 'rsp_contrib_amt', 2, populate_none_with_zero=True),
-        Txn2TableColMap('RetOfCapital'     , 'net_return_of_capital', 2, populate_none_with_zero=True),
-        # Txn2TableColMap('SecurityID1'      , 'security_id1'),
-        # Txn2TableColMap('SecurityID2'      , 'security_id2'),
-        Txn2TableColMap('Symbol1'          , 'symbol1'),
-        # Txn2TableColMap('Symbol2'          , 'symbol2'),
-        Txn2TableColMap('SecTypeCode1'     , 'sectype1'),
-        Txn2TableColMap('SecTypeCode2'     , 'sectype2'),
-        # Txn2TableColMap('TxnUserDef3Name'  , 'source'),  # TODO_CLEANUP: seems source is always null in current table ... remove once confirmed not needed
-        # Txn2TableColMap('PortfolioCode'    , 'market_name'),  # TODO_CLEANUP: seems market_name is always null in current table ... remove once confirmed not needed
-        Txn2TableColMap('CostPerUnit'      , 'cost_per_unit', 9),
-        Txn2TableColMap('CostBasis'        , 'total_cost', 2),
-        Txn2TableColMap('LocalTranKey'     , 'local_tran_key'),
-        Txn2TableColMap('TransactionName'  , 'tran_desc'),
-        Txn2TableColMap('Comment01'        , 'comment01'),
-        Txn2TableColMap('SectionDesc'      , 'section_desc'),
-        Txn2TableColMap('StmtTranDesc'     , 'stmt_tran_desc'),
-        Txn2TableColMap('NetEligDividend'  , 'net_elig_dividend', 2, populate_none_with_zero=True),
-        Txn2TableColMap('NetNonEligDividend', 'net_non_elig_dividend', 2, populate_none_with_zero=True),
-        Txn2TableColMap('FxRate'           , 'fx_rate', 9),
-        Txn2TableColMap('PrincipalCurrencyISOCode1', 'fx_denom_ccy'),
-        Txn2TableColMap('ReportingCurrencyISOCode', 'fx_numer_ccy'),
-        Txn2TableColMap('WhFedTaxAmt'      , 'whfedtax_amt', 2, populate_none_with_zero=True),
-        Txn2TableColMap('WhNrTaxAmt'       , 'whnrtax_amt', 2, populate_none_with_zero=True),
-        Txn2TableColMap('TradeAmountLocal' , 'trade_amount_local', 2),
-        Txn2TableColMap('CostPerUnitLocal' , 'cost_per_unit_local', 9),
-        Txn2TableColMap('CostBasisLocal'   , 'total_cost_local', 2),
+        Txn2TableColMap('ProprietarySymbol', 'security_id__c'),
+        Txn2TableColMap('Symbol'           , 'symbol__c'),
+        Txn2TableColMap('Name4Stmt'        , 'name4stmt__c'),
+        Txn2TableColMap('TransactionCode'  , 'tran_code__c'),
+        Txn2TableColMap('TransactionName'  , 'tran_desc__c'),
+        Txn2TableColMap('Comment01'        , 'comment01__c'),
+        Txn2TableColMap('TradeDateDT'      , 'trade_date__c'),
+        Txn2TableColMap('TradeDate'        , 'trade_date_string__c'
+                            , lambda x: x.strftime('%Y%m%d') if isinstance(x, datetime.date) else x
+                            , lambda x: datetime.strptime(x, '%Y%m%d').date() if len(x) else None),
+        Txn2TableColMap('SettleDateDT'     , 'settle_date__c'),
+        Txn2TableColMap('SettleDate'       , 'settle_date_string__c'
+                            , lambda x: x.strftime('%Y%m%d') if isinstance(x, datetime.date) else x
+                            , lambda x: datetime.strptime(x, '%Y%m%d').date() if len(x) else None),
+        Txn2TableColMap('SecCcy'           , 'sec_ccy__c'),
+        Txn2TableColMap('RptCcy'           , 'port_ccy__c'),
+        Txn2TableColMap('TradeDate'        , 'group_ccy', lambda x: 'CAD'),  # TODO: remove this? Or figure out its relevance if always CAD?
+        Txn2TableColMap('TradeDate'        , 'firm_ccy', lambda x: 'CAD'),  # TODO: remove this? Or figure out its relevance if always CAD?
+        Txn2TableColMap('SfPortfolioID'    , 'Portfolio__c'),
+        # Txn2TableColMap('SfGroupID'       , 'sf_statement_group_Id'), # Commented out in Perl
+        Txn2TableColMap('SfGroupCode'      , 'sf_statement_group'),  # TODO: remove this? (not required)
+        Txn2TableColMap('Quantity'         , 'quantity__c'
+                            , lambda x: x if not x else normal_round(x, 2)),
+        Txn2TableColMap('TradeAmountLocal' , 'trade_amt_sec__c'
+                            , lambda x: x if not x else normal_round(x, 2)),
+        Txn2TableColMap('TradeAmount'      , 'trade_amt_port__c'
+                            , lambda x: x if not x else normal_round(x, 2)),
+        Txn2TableColMap('TradeAmountFirm'  , 'trade_amt_firm__c'
+                            , lambda x: x if not x else normal_round(x, 2)),
+        Txn2TableColMap('CashFlowLocal'    , 'cash_flow_sec__c'
+                            , lambda x: x if not x else normal_round(x, 2)),
+        Txn2TableColMap('CashFlow'         , 'cash_flow_port__c'
+                            , lambda x: x if not x else normal_round(x, 2)),
+        Txn2TableColMap('CashFlowFirm'     , 'cash_flow_firm__c'
+                            , lambda x: x if not x else normal_round(x, 2)),
+        Txn2TableColMap('PricePerUnit'     , 'price_per_unit_port__c'
+                            , lambda x: x if not x else normal_round(x, 9)),
+        Txn2TableColMap('PricePerUnitLocal', 'price_per_unit_sec__c'
+                            , lambda x: x if not x else normal_round(x, 9)),
+        Txn2TableColMap('RealizedGain'     , 'realized_gain_port__c'
+                            , lambda x: x if not x else normal_round(x, 2)),
+        Txn2TableColMap('Commission'       , 'commission__c'
+                            , lambda x: x if not x else normal_round(x, 2)),
+        Txn2TableColMap('DataHandle'       , 'data_handle'),
+        Txn2TableColMap('LocalTranKey'     , 'lw_tran_id__c'),
+        Txn2TableColMap('WarnCode'         , 'warn_code'),
+        Txn2TableColMap('Warning'          , 'warning'),
         Txn2TableColMap('trade_date_original', 'trade_date_original'),
     ]
 
@@ -834,35 +791,40 @@ class COREDBLWTxnSummaryRepository(TransactionRepository):
             transactions = [transactions]
 
         # Loop thru; produce list of dicts. Each will have keys matching table column names
-        txn_dicts = []
+        table_ready_dicts = []
         delete_stmts = []
         now = datetime.datetime.now()
         common_dict = {
-            'scenariodate': now,
-            'asofdate': now,
-            'asofuser': (f"{os.getlogin()}_{os.environ.get('APP_NAME') or os.path.basename(__file__)}")[:32],
+            'gendate': now,
+            'moddate': now,
+            'genuser': (f"{os.getlogin()}_{os.environ.get('APP_NAME') or os.path.basename(__file__)}")[:32],
+            'moduser': (f"{os.getlogin()}_{os.environ.get('APP_NAME') or os.path.basename(__file__)}")[:32],
             'computer': socket.gethostname().upper()
         }
         for txn in transactions:
-            txn_dict = common_dict.copy()
-            for cm in self.txn2table_column_mappings:
+            table_ready_dict = common_dict.copy()
+            for cm in reversed(self.txn2table_column_mappings):
                 # if hasattr(txn, cm.transaction_attribute):
                 # If the attribute exists for this transaction, populate the dict with its value
                 attr_value = getattr(txn, cm.transaction_attribute, None)
 
-                # Round, if specified
-                if cm.round_to_decimal_places and attr_value:
-                    attr_value = normal_round(attr_value, cm.round_to_decimal_places)
+                # # Round, if specified
+                # if cm.round_to_decimal_places and attr_value:
+                #     attr_value = normal_round(attr_value, cm.round_to_decimal_places)
 
-                # Replace None with 0.0, if specified
-                if cm.populate_none_with_zero and (not attr_value or pd.isna(attr_value)):
-                    attr_value = 0.0
+                # # Replace None with 0.0, if specified
+                # if cm.populate_none_with_zero and (not attr_value or pd.isna(attr_value)):
+                #     attr_value = 0.0
+
+                # Apply formatting function, if specified
+                if cm.txn2table_format_function:
+                    attr_value = cm.txn2table_format_function(attr_value)
 
                 # Assign value in dict
-                txn_dict[cm.table_column] = attr_value
+                table_ready_dict[cm.table_column] = attr_value
             
             # Now we have the dict containing all desired values for the row. Append it:
-            txn_dicts.append(txn_dict)
+            table_ready_dicts.append(table_ready_dict)
 
             # Also create & append delete stmt, if it's not already there:
             delete_stmt = sql.delete(self.table.table_def)
@@ -872,7 +834,163 @@ class COREDBLWTxnSummaryRepository(TransactionRepository):
                 delete_stmts.append(delete_stmt)
 
         # Now we have a list of dicts. Convert to df to facilitate bulk insert: 
-        df = pd.DataFrame(txn_dicts)
+        df = pd.DataFrame(table_ready_dicts)
+
+        # Delete old results
+        for stmt in delete_stmts:
+            logging.debug(f'Deleting old results from {self.table.cn}... {str(stmt)}')
+            delete_res = self.table.execute_write(stmt)
+
+        # Bulk insert df
+        logging.info(f'Inserting {len(df)} new results to {self.table.cn}...')
+        res = self.table.bulk_insert(df)
+
+        # Reutrn row count
+        return res.rowcount
+
+
+    def get(self, portfolio_code: Union[str,None]=None, trade_date: Union[datetime.date, Tuple[datetime.date, datetime.date], None]=None) -> List[Transaction]:
+        pass
+
+
+class COREDBLWTxnSummaryRepository(TransactionRepository):
+    table = COREDBLWTxnSummaryTable()
+    readable_name = table.readable_name
+    txn2table_column_mappings = [
+        # apx2sf.pl @SF_TRANSACTIONS_feed
+        # ({transaction attribute}, {table column}, {txn2table_format_function}, {table2txn_format_function})
+        # In cases where the same txn attribute maps to multiple table columns, the more desirable column should be listed first (higher)
+        # In cases where the same table column maps to multiple txn attributes, the more desirable attribute should be listed first (higher)
+        Txn2TableColMap('PortfolioCode'    , 'portfolio_code'),
+        Txn2TableColMap('PortfolioName'    , 'portfolio_name'),
+        Txn2TableColMap('TransactionCode'  , 'tran_code'),
+        Txn2TableColMap('TradeDate'        , 'trade_date'),
+        Txn2TableColMap('SettleDate'       , 'settle_date'),
+        Txn2TableColMap('Symbol1'          , 'symbol'),
+        # Txn2TableColMap('Cusip'    , 'cusip'),  # TODO_CLEANUP: seems cusip is always null in current table ... remove once confirmed not needed
+        Txn2TableColMap('Name4Stmt'        , 'name4stmt'),
+        Txn2TableColMap('Quantity'         , 'quantity'
+                            , lambda x: x if not x else normal_round(x, 9)),
+        Txn2TableColMap('TradeAmount'      , 'trade_amount'
+                            , lambda x: x if not x else normal_round(x, 2)),
+        Txn2TableColMap('CashFlow'         , 'cash_flow'
+                            , lambda x: x if not x else normal_round(x, 2)),
+        Txn2TableColMap('BrokerName'       , 'broker_name'),
+        Txn2TableColMap('CustodianName'    , 'custodian_name'),
+        Txn2TableColMap('CustAcctNotify'   , 'cust_acct_notify'),
+        Txn2TableColMap('PricePerUnit'     , 'price_per_unit'
+                            , lambda x: x if not x else normal_round(x, 9)),
+        Txn2TableColMap('Commission'       , 'commission'
+                            , lambda x: 0.0 if (not x or pd.isna(x)) else normal_round(x, 9)),
+        Txn2TableColMap('NetInterest'      , 'net_interest'
+                            , lambda x: 0.0 if (not x or pd.isna(x)) else normal_round(x, 2)),
+        Txn2TableColMap('NetDividend'      , 'net_dividend'
+                            , lambda x: 0.0 if (not x or pd.isna(x)) else normal_round(x, 2)),
+        Txn2TableColMap('NetFgnIncome'     , 'net_fgn_income'
+                            , lambda x: 0.0 if (not x or pd.isna(x)) else normal_round(x, 2)),
+        Txn2TableColMap('CapGainsDistrib'  , 'cap_gains_distrib'
+                            , lambda x: 0.0 if (not x or pd.isna(x)) else x),
+        Txn2TableColMap('TotalIncome'      , 'tot_income'
+                            , lambda x: 0.0 if (not x or pd.isna(x)) else normal_round(x, 2)),
+        Txn2TableColMap('RealizedGain'     , 'realized_gain'
+                            , lambda x: x if not x else normal_round(x, 2)),
+        Txn2TableColMap('TfsaContribAmt'   , 'tfsa_contrib_amt'
+                            , lambda x: 0.0 if (not x or pd.isna(x)) else normal_round(x, 2)),
+        Txn2TableColMap('RspContribAmt'    , 'rsp_contrib_amt'
+                            , lambda x: 0.0 if (not x or pd.isna(x)) else normal_round(x, 2)),
+        Txn2TableColMap('RetOfCapital'     , 'net_return_of_capital'
+                            , lambda x: 0.0 if (not x or pd.isna(x)) else normal_round(x, 2)),
+        # Txn2TableColMap('SecurityID1'      , 'security_id1'),
+        # Txn2TableColMap('SecurityID2'      , 'security_id2'),
+        Txn2TableColMap('Symbol1'          , 'symbol1'),
+        # Txn2TableColMap('Symbol2'          , 'symbol2'),
+        Txn2TableColMap('SecTypeCode1'     , 'sectype1'),
+        Txn2TableColMap('SecTypeCode2'     , 'sectype2'),
+        # Txn2TableColMap('TxnUserDef3Name'  , 'source'),  # TODO_CLEANUP: seems source is always null in current table ... remove once confirmed not needed
+        # Txn2TableColMap('PortfolioCode'    , 'market_name'),  # TODO_CLEANUP: seems market_name is always null in current table ... remove once confirmed not needed
+        Txn2TableColMap('CostPerUnit'      , 'cost_per_unit'
+                            , lambda x: x if not x else normal_round(x, 9)),
+        Txn2TableColMap('CostBasis'        , 'total_cost'
+                            , lambda x: x if not x else normal_round(x, 2)),
+        Txn2TableColMap('LocalTranKey'     , 'local_tran_key'),
+        Txn2TableColMap('TransactionName'  , 'tran_desc'),
+        Txn2TableColMap('Comment01'        , 'comment01'),
+        Txn2TableColMap('SectionDesc'      , 'section_desc'),
+        Txn2TableColMap('StmtTranDesc'     , 'stmt_tran_desc'),
+        Txn2TableColMap('NetEligDividend'  , 'net_elig_dividend'
+                            , lambda x: 0.0 if (not x or pd.isna(x)) else normal_round(x, 2)),
+        Txn2TableColMap('NetNonEligDividend', 'net_non_elig_dividend'
+                            , lambda x: 0.0 if (not x or pd.isna(x)) else normal_round(x, 2)),
+        Txn2TableColMap('FxRate'           , 'fx_rate'
+                            , lambda x: x if not x else normal_round(x, 9)),
+        Txn2TableColMap('PrincipalCurrencyISOCode1', 'fx_denom_ccy'),
+        Txn2TableColMap('ReportingCurrencyISOCode', 'fx_numer_ccy'),
+        Txn2TableColMap('WhFedTaxAmt'      , 'whfedtax_amt'
+                            , lambda x: 0.0 if (not x or pd.isna(x)) else normal_round(x, 2)),
+        Txn2TableColMap('WhNrTaxAmt'       , 'whnrtax_amt'
+                            , lambda x: 0.0 if (not x or pd.isna(x)) else normal_round(x, 2)),
+        Txn2TableColMap('TradeAmountLocal' , 'trade_amount_local'
+                            , lambda x: x if not x else normal_round(x, 2)),
+        Txn2TableColMap('CostPerUnitLocal' , 'cost_per_unit_local'
+                            , lambda x: x if not x else normal_round(x, 9)),
+        Txn2TableColMap('CostBasisLocal'   , 'total_cost_local'
+                            , lambda x: x if not x else normal_round(x, 2)),
+        Txn2TableColMap('ProprietarySymbol', 'lw_id'),
+        Txn2TableColMap('ProprietarySymbol1', 'lw_id'),
+        Txn2TableColMap('PortfolioBaseID'   , 'portfolio_id'),
+        Txn2TableColMap('PortfolioID'       , 'portfolio_id'),
+        Txn2TableColMap('trade_date_original', 'trade_date_original'),
+    ]
+
+
+    def create(self, transactions: Union[List[Transaction],Transaction]) -> int:
+        if isinstance(transactions, Transaction):
+            transactions = [transactions]
+
+        # Loop thru; produce list of dicts. Each will have keys matching table column names
+        table_ready_dicts = []
+        delete_stmts = []
+        now = datetime.datetime.now()
+        common_dict = {
+            'scenariodate': now,
+            'asofdate': now,
+            'asofuser': (f"{os.getlogin()}_{os.environ.get('APP_NAME') or os.path.basename(__file__)}")[:32],
+            'computer': socket.gethostname().upper()
+        }
+        for txn in transactions:
+            table_ready_dict = common_dict.copy()
+            for cm in reversed(self.txn2table_column_mappings):
+                # if hasattr(txn, cm.transaction_attribute):
+                # If the attribute exists for this transaction, populate the dict with its value
+                attr_value = getattr(txn, cm.transaction_attribute, None)
+
+                # # Round, if specified
+                # if cm.round_to_decimal_places and attr_value:
+                #     attr_value = normal_round(attr_value, cm.round_to_decimal_places)
+
+                # # Replace None with 0.0, if specified
+                # if cm.populate_none_with_zero and (not attr_value or pd.isna(attr_value)):
+                #     attr_value = 0.0
+
+                # Apply formatting function, if specified
+                if cm.txn2table_format_function:
+                    attr_value = cm.txn2table_format_function(attr_value)
+
+                # Assign value in dict
+                table_ready_dict[cm.table_column] = attr_value
+            
+            # Now we have the dict containing all desired values for the row. Append it:
+            table_ready_dicts.append(table_ready_dict)
+
+            # Also create & append delete stmt, if it's not already there:
+            delete_stmt = sql.delete(self.table.table_def)
+            delete_stmt = delete_stmt.where(self.table.c.portfolio_code == txn.portfolio_code)
+            delete_stmt = delete_stmt.where(self.table.c.trade_date_original == txn.trade_date_original)
+            if delete_stmt not in delete_stmts:
+                delete_stmts.append(delete_stmt)
+
+        # Now we have a list of dicts. Convert to df to facilitate bulk insert: 
+        df = pd.DataFrame(table_ready_dicts)
 
         # Delete old results
         for stmt in delete_stmts:
@@ -887,8 +1005,29 @@ class COREDBLWTxnSummaryRepository(TransactionRepository):
         return res.rowcount
 
     def get(self, portfolio_code: Union[str,None]=None, trade_date: Union[datetime.date, Tuple[datetime.date, datetime.date], None]=None) -> List[Transaction]:
-        pass
+        # Assign from & to dates based on type of trade_date
+        if isinstance(trade_date, tuple):
+            from_date, to_date = trade_date[0], trade_date[1]
+        elif isinstance(trade_date, datetime.date):
+            from_date = to_date = trade_date
+        else:
+            from_date = to_date = None
 
+        # Query table
+        res_df = self.table.read(portfolio_code=portfolio_code, from_date=from_date, to_date=to_date)
 
+        # Loop thru df and build a list of transactions:
+        transactions = []
+        for i, row in res_df.iterrows():
+            txn_dict = {}
+            for cm in reversed(self.txn2table_column_mappings):
+                col_value = row.get(cm.table_column)
+                txn_dict[cm.transaction_attribute] = col_value
 
+            # Now we have a dict containing the desired values, with attribute names as the keys. 
+            # Create the Transaction and append to the transaction list:
+            txn = Transaction(**txn_dict)
+            transactions.append(txn)
+
+        return transactions
 

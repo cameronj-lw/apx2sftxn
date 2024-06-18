@@ -261,8 +261,12 @@ class BaseTable(object):
 
     @property
     def cn(self):  # Class name. Avoids having to print/log type(self).__name__.
-        return type(self).__name__
-    
+        return type(self).__name__    
+
+    @classmethod
+    def readable_name(self):
+        return f'{self._database.engine.host}.{self._database.engine.db}.{self.schema}.{self.table_name} table'
+        
 
 class ScenarioTable(BaseTable):
     """

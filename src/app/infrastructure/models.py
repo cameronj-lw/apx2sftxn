@@ -4,7 +4,7 @@ from dataclasses import dataclass, field
 import datetime
 import os
 import socket
-from typing import Any, Dict, List, Type, Union
+from typing import Any, Callable, Dict, List, Type, Union
 
 # native
 from domain.models import Heartbeat
@@ -109,6 +109,8 @@ class MGMTDBHeartbeat(Heartbeat):
 class Txn2TableColMap:
     transaction_attribute: str
     table_column: str
-    round_to_decimal_places: Union[int, None] = None
-    populate_none_with_zero: bool = False
+    txn2table_format_function: Union[Callable, None] = None
+    table2txn_format_function: Union[Callable, None] = None
+    # round_to_decimal_places: Union[int, None] = None
+    # populate_none_with_zero: bool = False
 
