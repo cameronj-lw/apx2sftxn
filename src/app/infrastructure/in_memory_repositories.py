@@ -163,7 +163,10 @@ class APXDBvCurrencyInMemoryRepository(InMemorySingletonSQLRepository):
                             , relevant_columns=['ISOCode'])
 
     def supplement(self, transaction: Transaction):
-        super().supplement(transaction)
+        if hasattr(transaction, 'FXNumeratorCurrencyCode'):
+            # Don't do the superclass supplement unless the required txn attribute exists
+            # TODO: better way to avoid the error when using this class as part of APX2SFTxn engine?
+            super().supplement(transaction)
         
         # Also supplement ReportingCurrencyCode with ReportingCurrencyISOCode
         if hasattr(transaction, 'ReportingCurrencyCode'):
@@ -262,7 +265,13 @@ class APXRepDBvPortfolioAndStmtGroupCurrencyInMemoryRepository(InMemorySingleton
 class CoreDBSFPortfolioLatestInMemoryRepository(InMemorySingletonSQLRepository):
     def __init__(self):
         super().__init__(pk_columns=[PKColumnMapping('PortfolioCode', 'LW_Portfolio_ID__c')], sql_source=CoreDBSFPortfolioLatestView
-                            , relevant_columns=['PortfolioCurrencyISOCode', 'StatementGroupCurrencyISOCode'])
+                            , relevant_columns=['PortfolioCurrencyISOCode', 'StatementGroupCurrencyISOCode', 'Id'])
+
+    def supplement(self, transaction: Transaction):
+        # Also assign the SF Portfolio ID
+        supplemental_data = super().supplement(transaction)
+        if sf_portfolio_id := supplemental_data.get('Id'):
+            transaction.SfPortfolioID = sf_portfolio_id
 
 
 class CoreDBRealizedGainLossInMemoryRepository(InMemorySingletonSQLRepository):

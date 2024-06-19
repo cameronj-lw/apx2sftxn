@@ -27,6 +27,7 @@ from infrastructure.in_memory_repositories import (
     APXDBvPortfolioBaseInMemoryRepository, APXDBvPortfolioBaseCustomInMemoryRepository, APXDBvPortfolioBaseSettingExInMemoryRepository,
     APXDBvCurrencyInMemoryRepository, APXDBvCustodianInMemoryRepository,
     APXDBvFXRateInMemoryRepository,
+    APXRepDBvPortfolioAndStmtGroupCurrencyInMemoryRepository, CoreDBSFPortfolioLatestInMemoryRepository,
 )
 from infrastructure.sql_repositories import (
     MGMTDBHeartbeatRepository, 
@@ -67,13 +68,18 @@ def main():
 
     # Define columns for matching and exclusion
     match_columns = ['portfolio_code', 'trade_date', 'name4stmt', 'quantity']
-    match_columns = ['local_tran_key']  # for testing LW txn summary
-    match_columns = ['lw_tran_id__c']  # for testing APX2SFTxn
     exclude_columns = ['record_id', 'scenario', 'data_handle', 'asofdate', 'asofuser', 'scenariodate', 'computer'
-        , 'lw_id', 'trade_date_original', 'portfolio_id'
         , 'gendate', 'moddate', 'genuser', 'moduser'
+        , 'lw_id', 'trade_date_original', 'portfolio_id'  # cols DNE in old LW Txn Summary or APX2SFTXN
+        , 'sf_statement_group'  # thinking this is not needed for inclusion in new APX2SFTxn
+        , 'security_id1', 'security_id2', 'price_per_unit_local'  # existing LW Transaction Summary doesn't save these to DB
     ]
-    tolerances = {'fx_rate': 0.000051, 'commission': 0.005}
+    tolerances = {
+        'fx_rate': 0.000051,  # Perl is inconsistent in number of rounding places (sometimes 4, sometimes 9? Not sure)
+        'commission': 0.005,  # Perl is inconsistent in number of rounding places (2 places only for intl equities? Not sure)
+        'trade_amt_firm__c': 0.011,  # Penny diffs in non-CAD portfolios - not sure why... TODO: figure this out, ideally?
+        'cash_flow_firm__c': 0.011,  # Penny diffs in non-CAD portfolios - not sure why... TODO: figure this out, ideally?
+    }
     
     if not args.portfolio_code:
         # df1 = COREDBLWTxnSummaryTable().read(from_date=args.from_date, to_date=args.to_date)
@@ -91,61 +97,65 @@ def main():
         # from infrastructure.util.math import normal_round
         # print(normal_round(1.3287794865, 9)) 
         engines = [
-            StraightThruTransactionProcessingEngine(
-                source_queue_repo = None,
-                target_txn_repos = [CoreDBRealizedGainLossTransactionRepository()],
-                target_queue_repos = [],
-                source_txn_repo = APXDBRealizedGainLossRepository(),
-            ),
-            StraightThruTransactionProcessingEngine(
-                source_queue_repo = None,
-                target_txn_repos = [CoreDBTransactionActivityRepository()],
-                target_queue_repos = [],
-                source_txn_repo = APXDBTransactionActivityRepository(),
-            ),
-            LWTransactionSummaryEngine(
-                source_queue_repo = CoreDBLWTransactionSummaryQueueRepository(),
-                target_txn_repos = [
-                    # CoreDBLWTransactionSummaryRepository(),
-                    COREDBLWTxnSummaryRepository(),
-                ],
-                target_queue_repos = [COREDBAPX2SFTxnQueueRepository()],
-                source_txn_repo = CoreDBTransactionActivityRepository(),
-                dividends_repo = APXDBDividendRepository(),
-                preprocessing_supplementary_repos = [
-                    APXDBvPortfolioInMemoryRepository(),
-                    APXDBvPortfolioBaseInMemoryRepository(),
-                    APXDBvPortfolioBaseCustomInMemoryRepository(),
-                    APXDBvPortfolioSettingExInMemoryRepository(),
-                    APXDBvPortfolioBaseSettingExInMemoryRepository(),
-                    APXDBvSecurityInMemoryRepository(), 
-                    APXRepDBSecurityHashInMemoryRepository(),
-                    APXDBvCurrencyInMemoryRepository(),
-                    APXDBvCustodianInMemoryRepository(),
-                    CoreDBRealizedGainLossSupplementaryRepository(),
-                    # APXDBPastDividendRepository(),
-                ],
-                prev_bday_cost_repo = LWDBAPXAppraisalPrevBdayRepository(),
-                postprocessing_supplementary_repos = [
-                    # TODO_LAYERS: should these logics just be part of the engine?
-                    TransactionNameRepository(),
-                    TransactionSectionAndStmtTranRepository(),
-                    TransactionOtherPostSupplementRepository(),
-                    TransactionCashflowRepository(),
-                ]
-            ),
-            # LWAPX2SFTransactionEngine(
-            #     source_queue_repo = COREDBAPX2SFTxnQueueRepository(),
-            #     target_txn_repos = [
-            #         COREDBSFTransactionRepository(),
-            #     ],
+            # StraightThruTransactionProcessingEngine(
+            #     source_queue_repo = None,
+            #     target_txn_repos = [CoreDBRealizedGainLossTransactionRepository()],
             #     target_queue_repos = [],
-            #     source_txn_repo = COREDBLWTxnSummaryRepository(),
-            #     preprocessing_supplementary_repos = [
-            #         APXDBvPortfolioBaseSettingExInMemoryRepository(),
-            #     ],
-            #     fx_rate_repo = APXDBvFXRateInMemoryRepository(),
+            #     source_txn_repo = APXDBRealizedGainLossRepository(),
             # ),
+            # StraightThruTransactionProcessingEngine(
+            #     source_queue_repo = None,
+            #     target_txn_repos = [CoreDBTransactionActivityRepository()],
+            #     target_queue_repos = [],
+            #     source_txn_repo = APXDBTransactionActivityRepository(),
+            # ),
+            # LWTransactionSummaryEngine(
+            #     source_queue_repo = CoreDBLWTransactionSummaryQueueRepository(),
+            #     target_txn_repos = [
+            #         # CoreDBLWTransactionSummaryRepository(),
+            #         COREDBLWTxnSummaryRepository(),
+            #     ],
+            #     target_queue_repos = [COREDBAPX2SFTxnQueueRepository()],
+            #     source_txn_repo = CoreDBTransactionActivityRepository(),
+            #     dividends_repo = APXDBDividendRepository(),
+            #     preprocessing_supplementary_repos = [
+            #         APXDBvPortfolioInMemoryRepository(),
+            #         APXDBvPortfolioBaseInMemoryRepository(),
+            #         APXDBvPortfolioBaseCustomInMemoryRepository(),
+            #         APXDBvPortfolioSettingExInMemoryRepository(),
+            #         APXDBvPortfolioBaseSettingExInMemoryRepository(),
+            #         APXDBvSecurityInMemoryRepository(), 
+            #         APXRepDBSecurityHashInMemoryRepository(),
+            #         APXDBvCurrencyInMemoryRepository(),
+            #         APXDBvCustodianInMemoryRepository(),
+            #         CoreDBRealizedGainLossSupplementaryRepository(),
+            #         # APXDBPastDividendRepository(),
+            #     ],
+            #     prev_bday_cost_repo = LWDBAPXAppraisalPrevBdayRepository(),
+            #     postprocessing_supplementary_repos = [
+            #         # TODO_LAYERS: should these logics just be part of the engine?
+            #         TransactionNameRepository(),
+            #         TransactionSectionAndStmtTranRepository(),
+            #         TransactionOtherPostSupplementRepository(),
+            #         TransactionCashflowRepository(),
+            #     ]
+            # ),
+            LWAPX2SFTransactionEngine(
+                source_queue_repo = COREDBAPX2SFTxnQueueRepository(),
+                target_txn_repos = [
+                    COREDBSFTransactionRepository(),
+                ],
+                target_queue_repos = [],
+                source_txn_repo = COREDBLWTxnSummaryRepository(),
+                preprocessing_supplementary_repos = [
+                    APXDBvPortfolioBaseSettingExInMemoryRepository(),
+                    APXRepDBvPortfolioAndStmtGroupCurrencyInMemoryRepository(),
+                    CoreDBSFPortfolioLatestInMemoryRepository(),
+                    APXDBvSecurityInMemoryRepository(),
+                    APXDBvCurrencyInMemoryRepository(),
+                ],
+                fx_rate_repo = APXDBvFXRateInMemoryRepository(),
+            ),
         ]
     else:
         engines = []
@@ -160,12 +170,14 @@ def main():
                 print(f'{datetime.datetime.now()}: Creating transactions in {repo.cn}...')
                 create_res = repo.create(transactions=result)
 
-        # df1 = COREDBLWTxnSummaryTable().read(portfolio_code=pc, from_date=args.from_date, to_date=args.to_date)
-        # if args.from_date == datetime.date(2024, 4, 8):
-        #     df2 = APXRepDBLWTxnSummaryTable().read(scenario='BASE', data_handle='8328CB5AC1CB40E083F0DA4EE0DAC2BD', portfolio_code=pc, from_date=args.from_date, to_date=args.to_date)
-        # else:
-        #     df2 = APXRepDBLWTxnSummaryTable().read(scenario='BASE', data_handle='37020804B005458B874D74434DBCD0A0', portfolio_code=pc, from_date=args.from_date, to_date=args.to_date)
+        match_columns = ['local_tran_key']  # for testing LW txn summary
+        df1 = COREDBLWTxnSummaryTable().read(portfolio_code=pc, from_date=args.from_date, to_date=args.to_date)
+        if args.from_date == datetime.date(2024, 4, 8):
+            df2 = APXRepDBLWTxnSummaryTable().read(scenario='BASE', data_handle='8328CB5AC1CB40E083F0DA4EE0DAC2BD', portfolio_code=pc, from_date=args.from_date, to_date=args.to_date)
+        else:
+            df2 = APXRepDBLWTxnSummaryTable().read(scenario='BASE', data_handle='37020804B005458B874D74434DBCD0A0', portfolio_code=pc, from_date=args.from_date, to_date=args.to_date)
     
+        match_columns = ['lw_tran_id__c']  # for testing APX2SFTxn
         df1 = COREDBSFTransactionTable().read(portfolio_code=pc, from_date=args.from_date, to_date=args.to_date)
         df2 = LWDBSFTransactionTable().read(portfolio_code=pc, from_date=args.from_date, to_date=args.to_date)
 

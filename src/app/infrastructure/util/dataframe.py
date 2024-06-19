@@ -62,7 +62,7 @@ def df_to_dict(df, pk_col_names: List[str]) -> Dict[Any, Dict[str, Any]]:
 
 
 # Function to compare two dataframes row by row
-def compare_dataframes(df1, df2, match_columns, exclude_columns, tolerances={}, ignore_zeros_vs_none=True, typecast_dates=True):
+def compare_dataframes(df1, df2, match_columns, exclude_columns, tolerances={}, ignore_zeros_vs_none=True, typecast_dates=True, ignore_blank_str_vs_none=True):
     # Initialize lists to store matched rows, unmatched rows, and matching rows with differences
     matched_rows = []
     unmatched_rows_df1 = []
@@ -70,10 +70,25 @@ def compare_dataframes(df1, df2, match_columns, exclude_columns, tolerances={}, 
     matching_rows_with_differences = []
     
     # Define function to determine if two values are equal
-    def are_equal(val1, val2, tolerance=None, ignore_zeros_vs_none=True, typecast_dates=True):
+    def are_equal(val1, val2, tolerance=None, ignore_zeros_vs_none=True, typecast_dates=True, ignore_blank_str_vs_none=True):
+
         # Handle np.nan
         if pd.isna(val1) and pd.isna(val2):
             return True
+
+        # Catch blank string and change to None (if specified)
+        if ignore_blank_str_vs_none:
+            if val1 == '':
+                val1 = None
+            if val2 == '':
+                val2 = None
+
+        # Catch dates and change to datetime.date (if specified)
+        if typecast_dates:
+            if isinstance(val1, datetime.date) and (isinstance(val2, pd.Timestamp) or isinstance(val2, datetime.datetime)):
+                val2 = val2.date()
+            elif isinstance(val2, datetime.date) and (isinstance(val1, pd.Timestamp) or isinstance(val1, datetime.datetime)):
+                val1 = val1.date()
 
         # Surface zero vs None as diffs (if specified)
         if not ignore_zeros_vs_none:

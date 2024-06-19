@@ -156,6 +156,7 @@ class TransactionOtherPostSupplementRepository(SupplementaryRepository):
         if transaction.TransactionCode in ('dv'):
             transaction.Quantity = None
             transaction.PricePerUnit = None
+            transaction.PricePerUnitLocal = None
             transaction.CostPerUnit = None
             transaction.CostPerUnitLocal = None
             transaction.CostBasis = None

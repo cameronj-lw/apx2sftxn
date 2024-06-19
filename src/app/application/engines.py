@@ -7,7 +7,7 @@ import logging
 import math
 import numbers
 import os
-from typing import List, Union
+from typing import List, Optional, Union
 
 
 # native
@@ -18,12 +18,14 @@ from domain.repositories import SupplementaryRepository, TransactionRepository, 
 
 @dataclass
 class TransactionProcessingEngine(ABC):
-    source_queue_repo: TransactionProcessingQueueRepository  # we'll read from this queue to detect new transactions for processing, and update status post-processing
+    source_queue_repo: Optional[TransactionProcessingQueueRepository]=None  # we'll read from this queue to detect new transactions for processing, and update status post-processing
     target_txn_repos: List[TransactionRepository]  # we'll save results here
     target_queue_repos: List[TransactionProcessingQueueRepository]  # we'll save as PENDING queue_status here
 
     def run(self):
         """ Subclasses may override if this default behaviour is not desired """
+        # TODO: Should this be made to accept optional starting_transactions? And/or return the results?
+        # Unsure if accepting starting_transactions from multiple portfolios/dates would work...
 
         # Get new transactions to process
         items_to_process = self.source_queue_repo.get(queue_status=QueueStatus.PENDING)
@@ -71,7 +73,8 @@ class TransactionProcessingEngine(ABC):
         return self.cn
 
     @abstractmethod
-    def process(self, queue_item: TransactionProcessingQueueItem) -> List[Transaction]:
+    def process(self, queue_item: Optional[TransactionProcessingQueueItem]=None
+                    , starting_transactions: Optional[List[Transaction]]=None) -> List[Transaction]:
         """ Subclasses must implement their own processing logic """
 
 
@@ -80,8 +83,9 @@ class StraightThruTransactionProcessingEngine(TransactionProcessingEngine):
     """ Straightforward engine, to simply get transactions from the source_repo """
     source_txn_repo: TransactionRepository
 
-    def process(self, queue_item: TransactionProcessingQueueItem) -> List[Transaction]:
-        # TODO_20240510: rewrite to process a queue item
+    def process(self, queue_item: Optional[TransactionProcessingQueueItem]=None
+                    , starting_transactions: Optional[List[Transaction]]=None) -> List[Transaction]:
+        # TODO: should this support a caller providing starting_transactions?
         logging.info(f'{self.cn} processing {queue_item}')
         res_transactions = self.source_txn_repo.get(portfolio_code=queue_item.portfolio_code, trade_date=queue_item.trade_date)
         
@@ -272,7 +276,7 @@ class LWTransactionSummaryEngine(TransactionProcessingEngine):
             txn.WhFedTaxAmt = txn.FedTaxWithheld 
         if hasattr(txn, 'FgnTaxPaid'):
             txn.WhNrTaxAmt = txn.FgnTaxPaid 
-        
+
     def massage_fi_maturities(self, txn: Transaction):
         if txn.TransactionCode == 'sl':
             if txn.SecTypeBaseCode1 == 'st':
@@ -505,6 +509,7 @@ class LWTransactionSummaryEngine(TransactionProcessingEngine):
         if txn.TransactionCode in ('dv'):
             txn.Quantity = None
             txn.PricePerUnit = None
+            txn.PricePerUnitLocal = None
             txn.CostPerUnit = None
             txn.CostPerUnitLocal = None
             txn.CostBasis = None
@@ -546,12 +551,17 @@ class LWTransactionSummaryEngine(TransactionProcessingEngine):
         txn.modified_by = f"{os.environ.get('APP_NAME')}_{str(self)}"
 
 
-    def process(self, queue_item: TransactionProcessingQueueItem) -> List[Transaction]:
-        logging.info(f'{self.cn} processing {queue_item}')
-        
-        source_transactions = self.source_txn_repo.get(portfolio_code=queue_item.portfolio_code, trade_date=queue_item.trade_date)
-        transactions = source_transactions.copy()
-        logging.info(f'{self.cn} found {len(transactions)} transactions from {self.source_txn_repo.cn}')
+    def process(self, queue_item: Optional[TransactionProcessingQueueItem]=None
+                    , starting_transactions: Optional[List[Transaction]]=None) -> List[Transaction]:
+
+        if starting_transactions:
+            transactions = starting_transactions.copy()
+        else:
+            logging.info(f'{self.cn} processing {queue_item}')
+            
+            source_transactions = self.source_txn_repo.get(portfolio_code=queue_item.portfolio_code, trade_date=queue_item.trade_date)
+            transactions = source_transactions.copy()
+            logging.info(f'{self.cn} found {len(transactions)} transactions from {self.source_txn_repo.cn}')
 
         source_dividends = self.dividends_repo.get(portfolio_code=queue_item.portfolio_code, trade_date=queue_item.trade_date)
         dividends = source_dividends.copy()
@@ -721,7 +731,7 @@ class LWTransactionSummaryEngine(TransactionProcessingEngine):
 
             if txn.TransactionCode == 'wd':
                 self.zero_registered_contributions(txn)
-                
+                    
             self.assign_sec_columns(txn)
 
             self.assign_transaction_name(txn)
@@ -761,15 +771,17 @@ class LWAPX2SFTransactionEngine(TransactionProcessingEngine):
                 sr.supplement(txn)
 
     def get_portfolio2firm_fx_rate(self, txn: Transaction):
+        # If CAD portfolio, return 1.0 - no need to query
+        if txn.ReportingCurrencyCode == 'ca':
+            return 1.0
+
         # Query provided repo for these values
         pk_column_values = {
-            'PriceDate'                 : txn.TradeDate.date(),
+            'PriceDate'                 : txn.TradeDate,
             'NumeratorCurrencyCode'     : 'ca',  # Because it's the firm currency (CAD)
             'DenominatorCurrencyCode'   : txn.ReportingCurrencyCode,
         }   
-        print(pk_column_values)
         get_res = self.fx_rate_repo.get(pk_column_values=pk_column_values)
-        print(get_res)
 
         return get_res.get('SpotRate')
 
@@ -793,12 +805,17 @@ class LWAPX2SFTransactionEngine(TransactionProcessingEngine):
                 setattr(txn, f'{attr}Firm', firm_ccy_val)
 
     
-    def process(self, queue_item: TransactionProcessingQueueItem) -> List[Transaction]:
-        logging.info(f'{self.cn} processing {queue_item}')
-        
-        source_transactions = self.source_txn_repo.get(portfolio_code=queue_item.portfolio_code, trade_date=queue_item.trade_date)
-        transactions = source_transactions.copy()
-        logging.info(f'{self.cn} found {len(transactions)} transactions from {self.source_txn_repo.cn}')
+    def process(self, queue_item: Optional[TransactionProcessingQueueItem]=None
+                    , starting_transactions: Optional[List[Transaction]]=None) -> List[Transaction]:
+                    
+        if starting_transactions:
+            transactions = starting_transactions.copy()
+        else:
+            logging.info(f'{self.cn} processing {queue_item}')
+            
+            source_transactions = self.source_txn_repo.get(portfolio_code=queue_item.portfolio_code, trade_date=queue_item.trade_date)
+            transactions = source_transactions.copy()
+            logging.info(f'{self.cn} found {len(transactions)} transactions from {self.source_txn_repo.cn}')
 
         # Supplement with specified repo(s)
         self.preprocessing_supplement(transactions)
@@ -820,7 +837,7 @@ class LWAPX2SFTransactionEngine(TransactionProcessingEngine):
 
             # apx2sf.pl line 2876-2881: Check for APX vs SF mismatch in portfolio currency
             if (apx_portf_ccy_iso := getattr(txn, 'PortfolioISOCode', None)) and (sf_portf_ccy_iso := getattr(txn, 'PortfolioCurrencyISOCode', None)):
-                if apx_portf_ccy_iso != sf_group_ccy_iso:
+                if apx_portf_ccy_iso != sf_portf_ccy_iso:
                     warn_msg = f'{txn.PortfolioCode} ({apx_portf_ccy_iso}): APX vs SF MISMATCH on portfolio reporting currency, using SF ({sf_portf_ccy_iso})'
                     logging.error(warn_msg)
                     # TODO_EH: further error handling here? 

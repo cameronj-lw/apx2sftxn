@@ -726,133 +726,6 @@ class CoreDBLWTransactionSummaryRepository(TransactionRepository):
         return []  # TODO: implement
 
 
-class COREDBSFTransactionRepository(TransactionRepository):
-    table = COREDBSFTransactionTable()
-    readable_name = table.readable_name
-    txn2table_column_mappings = [
-        # apx2sf.pl @SF_TRANSACTIONS_feed
-        # ({transaction attribute}, {table column}, {txn2table_format_function}, {table2txn_format_function})
-        # In cases where the same txn attribute maps to multiple table columns, the more desirable column should be listed first (higher)
-        # In cases where the same table column maps to multiple txn attributes, the more desirable attribute should be listed first (higher)
-        Txn2TableColMap('TradeDate'        , 'data_dt'),
-        Txn2TableColMap('PortfolioCode'    , 'portfolio_code'),
-        Txn2TableColMap('ProprietarySymbol', 'security_id__c'),
-        Txn2TableColMap('Symbol'           , 'symbol__c'),
-        Txn2TableColMap('Name4Stmt'        , 'name4stmt__c'),
-        Txn2TableColMap('TransactionCode'  , 'tran_code__c'),
-        Txn2TableColMap('TransactionName'  , 'tran_desc__c'),
-        Txn2TableColMap('Comment01'        , 'comment01__c'),
-        Txn2TableColMap('TradeDateDT'      , 'trade_date__c'),
-        Txn2TableColMap('TradeDate'        , 'trade_date_string__c'
-                            , lambda x: x.strftime('%Y%m%d') if isinstance(x, datetime.date) else x
-                            , lambda x: datetime.strptime(x, '%Y%m%d').date() if len(x) else None),
-        Txn2TableColMap('SettleDateDT'     , 'settle_date__c'),
-        Txn2TableColMap('SettleDate'       , 'settle_date_string__c'
-                            , lambda x: x.strftime('%Y%m%d') if isinstance(x, datetime.date) else x
-                            , lambda x: datetime.strptime(x, '%Y%m%d').date() if len(x) else None),
-        Txn2TableColMap('SecCcy'           , 'sec_ccy__c'),
-        Txn2TableColMap('RptCcy'           , 'port_ccy__c'),
-        Txn2TableColMap('TradeDate'        , 'group_ccy', lambda x: 'CAD'),  # TODO: remove this? Or figure out its relevance if always CAD?
-        Txn2TableColMap('TradeDate'        , 'firm_ccy', lambda x: 'CAD'),  # TODO: remove this? Or figure out its relevance if always CAD?
-        Txn2TableColMap('SfPortfolioID'    , 'Portfolio__c'),
-        # Txn2TableColMap('SfGroupID'       , 'sf_statement_group_Id'), # Commented out in Perl
-        Txn2TableColMap('SfGroupCode'      , 'sf_statement_group'),  # TODO: remove this? (not required)
-        Txn2TableColMap('Quantity'         , 'quantity__c'
-                            , lambda x: x if not x else normal_round(x, 2)),
-        Txn2TableColMap('TradeAmountLocal' , 'trade_amt_sec__c'
-                            , lambda x: x if not x else normal_round(x, 2)),
-        Txn2TableColMap('TradeAmount'      , 'trade_amt_port__c'
-                            , lambda x: x if not x else normal_round(x, 2)),
-        Txn2TableColMap('TradeAmountFirm'  , 'trade_amt_firm__c'
-                            , lambda x: x if not x else normal_round(x, 2)),
-        Txn2TableColMap('CashFlowLocal'    , 'cash_flow_sec__c'
-                            , lambda x: x if not x else normal_round(x, 2)),
-        Txn2TableColMap('CashFlow'         , 'cash_flow_port__c'
-                            , lambda x: x if not x else normal_round(x, 2)),
-        Txn2TableColMap('CashFlowFirm'     , 'cash_flow_firm__c'
-                            , lambda x: x if not x else normal_round(x, 2)),
-        Txn2TableColMap('PricePerUnit'     , 'price_per_unit_port__c'
-                            , lambda x: x if not x else normal_round(x, 9)),
-        Txn2TableColMap('PricePerUnitLocal', 'price_per_unit_sec__c'
-                            , lambda x: x if not x else normal_round(x, 9)),
-        Txn2TableColMap('RealizedGain'     , 'realized_gain_port__c'
-                            , lambda x: x if not x else normal_round(x, 2)),
-        Txn2TableColMap('Commission'       , 'commission__c'
-                            , lambda x: x if not x else normal_round(x, 2)),
-        Txn2TableColMap('DataHandle'       , 'data_handle'),
-        Txn2TableColMap('LocalTranKey'     , 'lw_tran_id__c'),
-        Txn2TableColMap('WarnCode'         , 'warn_code'),
-        Txn2TableColMap('Warning'          , 'warning'),
-        Txn2TableColMap('trade_date_original', 'trade_date_original'),
-    ]
-
-    def create(self, transactions: Union[List[Transaction],Transaction]) -> int:
-        if isinstance(transactions, Transaction):
-            transactions = [transactions]
-
-        # Loop thru; produce list of dicts. Each will have keys matching table column names
-        table_ready_dicts = []
-        delete_stmts = []
-        now = datetime.datetime.now()
-        common_dict = {
-            'gendate': now,
-            'moddate': now,
-            'genuser': (f"{os.getlogin()}_{os.environ.get('APP_NAME') or os.path.basename(__file__)}")[:32],
-            'moduser': (f"{os.getlogin()}_{os.environ.get('APP_NAME') or os.path.basename(__file__)}")[:32],
-            'computer': socket.gethostname().upper()
-        }
-        for txn in transactions:
-            table_ready_dict = common_dict.copy()
-            for cm in reversed(self.txn2table_column_mappings):
-                # if hasattr(txn, cm.transaction_attribute):
-                # If the attribute exists for this transaction, populate the dict with its value
-                attr_value = getattr(txn, cm.transaction_attribute, None)
-
-                # # Round, if specified
-                # if cm.round_to_decimal_places and attr_value:
-                #     attr_value = normal_round(attr_value, cm.round_to_decimal_places)
-
-                # # Replace None with 0.0, if specified
-                # if cm.populate_none_with_zero and (not attr_value or pd.isna(attr_value)):
-                #     attr_value = 0.0
-
-                # Apply formatting function, if specified
-                if cm.txn2table_format_function:
-                    attr_value = cm.txn2table_format_function(attr_value)
-
-                # Assign value in dict
-                table_ready_dict[cm.table_column] = attr_value
-            
-            # Now we have the dict containing all desired values for the row. Append it:
-            table_ready_dicts.append(table_ready_dict)
-
-            # Also create & append delete stmt, if it's not already there:
-            delete_stmt = sql.delete(self.table.table_def)
-            delete_stmt = delete_stmt.where(self.table.c.portfolio_code == txn.portfolio_code)
-            delete_stmt = delete_stmt.where(self.table.c.trade_date_original == txn.trade_date_original)
-            if delete_stmt not in delete_stmts:
-                delete_stmts.append(delete_stmt)
-
-        # Now we have a list of dicts. Convert to df to facilitate bulk insert: 
-        df = pd.DataFrame(table_ready_dicts)
-
-        # Delete old results
-        for stmt in delete_stmts:
-            logging.debug(f'Deleting old results from {self.table.cn}... {str(stmt)}')
-            delete_res = self.table.execute_write(stmt)
-
-        # Bulk insert df
-        logging.info(f'Inserting {len(df)} new results to {self.table.cn}...')
-        res = self.table.bulk_insert(df)
-
-        # Reutrn row count
-        return res.rowcount
-
-
-    def get(self, portfolio_code: Union[str,None]=None, trade_date: Union[datetime.date, Tuple[datetime.date, datetime.date], None]=None) -> List[Transaction]:
-        pass
-
-
 class COREDBLWTxnSummaryRepository(TransactionRepository):
     table = COREDBLWTxnSummaryTable()
     readable_name = table.readable_name
@@ -900,8 +773,8 @@ class COREDBLWTxnSummaryRepository(TransactionRepository):
                             , lambda x: 0.0 if (not x or pd.isna(x)) else normal_round(x, 2)),
         Txn2TableColMap('RetOfCapital'     , 'net_return_of_capital'
                             , lambda x: 0.0 if (not x or pd.isna(x)) else normal_round(x, 2)),
-        # Txn2TableColMap('SecurityID1'      , 'security_id1'),
-        # Txn2TableColMap('SecurityID2'      , 'security_id2'),
+        Txn2TableColMap('SecurityID1'      , 'security_id1'),
+        Txn2TableColMap('SecurityID2'      , 'security_id2'),
         Txn2TableColMap('Symbol1'          , 'symbol1'),
         # Txn2TableColMap('Symbol2'          , 'symbol2'),
         Txn2TableColMap('SecTypeCode1'     , 'sectype1'),
@@ -935,11 +808,12 @@ class COREDBLWTxnSummaryRepository(TransactionRepository):
                             , lambda x: x if not x else normal_round(x, 9)),
         Txn2TableColMap('CostBasisLocal'   , 'total_cost_local'
                             , lambda x: x if not x else normal_round(x, 2)),
-        Txn2TableColMap('ProprietarySymbol', 'lw_id'),
-        Txn2TableColMap('ProprietarySymbol1', 'lw_id'),
+        # below are new columns in new stuff - not saved to DB by existing LW Txn Summary
+        Txn2TableColMap('trade_date_original', 'trade_date_original'),
         Txn2TableColMap('PortfolioBaseID'   , 'portfolio_id'),
         Txn2TableColMap('PortfolioID'       , 'portfolio_id'),
-        Txn2TableColMap('trade_date_original', 'trade_date_original'),
+        Txn2TableColMap('PricePerUnitLocal' , 'price_per_unit_local'
+                            , lambda x: x if not x else normal_round(x, 9)),
     ]
 
 
@@ -1030,4 +904,137 @@ class COREDBLWTxnSummaryRepository(TransactionRepository):
             transactions.append(txn)
 
         return transactions
+
+
+class COREDBSFTransactionRepository(TransactionRepository):
+    table = COREDBSFTransactionTable()
+    readable_name = table.readable_name
+    txn2table_column_mappings = [
+        # apx2sf.pl @SF_TRANSACTIONS_feed
+        # ({transaction attribute}, {table column}, {txn2table_format_function}, {table2txn_format_function})
+        # In cases where the same txn attribute maps to multiple table columns, the more desirable column should be listed first (higher)
+        # In cases where the same table column maps to multiple txn attributes, the more desirable attribute should be listed first (higher)
+        Txn2TableColMap('TradeDate'        , 'data_dt'),
+        Txn2TableColMap('PortfolioCode'    , 'portfolio_code'),
+        Txn2TableColMap('ProprietarySymbol1', 'security_id__c'
+                            , lambda x: '' if x is None or not x else x),
+        Txn2TableColMap('ProprietarySymbol', 'security_id__c'
+                            , lambda x: '' if x is None or not x else x),
+        Txn2TableColMap('Symbol1'          , 'symbol__c'),
+        Txn2TableColMap('Symbol'           , 'symbol__c'),
+        Txn2TableColMap('Name4Stmt'        , 'name4stmt__c'),
+        Txn2TableColMap('TransactionCode'  , 'tran_code__c'),
+        Txn2TableColMap('TransactionName'  , 'tran_desc__c'),
+        Txn2TableColMap('Comment01'        , 'comment01__c'),
+        Txn2TableColMap('TradeDateDT'      , 'trade_date__c'),
+        Txn2TableColMap('TradeDate'        , 'trade_date_string__c'
+                            , lambda x: x.strftime('%b %e, %Y').replace('  ', ' ') if isinstance(x, datetime.date) else x
+                            , lambda x: datetime.strptime(x, '%b %e, %Y').date() if len(x) else None),
+        Txn2TableColMap('SettleDateDT'     , 'settle_date__c'),
+        Txn2TableColMap('SettleDate'       , 'settle_date_string__c'
+                            , lambda x: x.strftime('%b %e, %Y').replace('  ', ' ') if isinstance(x, datetime.date) else x
+                            , lambda x: datetime.strptime(x, '%b %e, %Y').date() if len(x) else None),
+        Txn2TableColMap('PrincipalCurrencyISOCode1', 'sec_ccy__c'),
+        Txn2TableColMap('ReportingCurrencyISOCode', 'port_ccy__c'),
+        Txn2TableColMap('TradeDate'        , 'group_ccy', lambda x: 'CAD'),  # TODO: remove this? Or figure out its relevance if always CAD?
+        Txn2TableColMap('TradeDate'        , 'firm_ccy', lambda x: 'CAD'),  # TODO: remove this? Or figure out its relevance if always CAD?
+        Txn2TableColMap('SfPortfolioID'    , 'Portfolio__c'),
+        # Txn2TableColMap('SfGroupID'       , 'sf_statement_group_Id'), # Commented out in Perl
+        Txn2TableColMap('SfGroupCode'      , 'sf_statement_group'),  # TODO: remove this? (not required)
+        Txn2TableColMap('Quantity'         , 'quantity__c'
+                            , lambda x: x if not x else normal_round(x, 2)),
+        Txn2TableColMap('TradeAmountLocal' , 'trade_amt_sec__c'
+                            , lambda x: x if not x else normal_round(x, 2)),
+        Txn2TableColMap('TradeAmount'      , 'trade_amt_port__c'
+                            , lambda x: x if not x else normal_round(x, 2)),
+        Txn2TableColMap('TradeAmountFirm'  , 'trade_amt_firm__c'
+                            , lambda x: x if not x else normal_round(x, 2)),
+        Txn2TableColMap('CashFlowLocal'    , 'cash_flow_sec__c'
+                            , lambda x: x if not x else normal_round(x, 2)),
+        Txn2TableColMap('CashFlow'         , 'cash_flow_port__c'
+                            , lambda x: x if not x else normal_round(x, 2)),
+        Txn2TableColMap('CashFlowFirm'     , 'cash_flow_firm__c'
+                            , lambda x: x if not x else normal_round(x, 2)),
+        Txn2TableColMap('PricePerUnit'     , 'price_per_unit_port__c'
+                            , lambda x: x if not x else normal_round(x, 9)),
+        Txn2TableColMap('PricePerUnitLocal', 'price_per_unit_sec__c'
+                            , lambda x: x if not x else normal_round(x, 9)),
+        Txn2TableColMap('RealizedGain'     , 'realized_gain_port__c'
+                            , lambda x: x if not x else normal_round(x, 2)),
+        Txn2TableColMap('Commission'       , 'commission__c'
+                            , lambda x: x if not x else normal_round(x, 2)),
+        Txn2TableColMap('DataHandle'       , 'data_handle'),
+        Txn2TableColMap('LocalTranKey'     , 'lw_tran_id__c'),
+        Txn2TableColMap('WarnCode'         , 'warn_code'
+                            , lambda x: 0 if not x else x),
+        Txn2TableColMap('Warning'          , 'warning'
+                            , lambda x: '' if x is None or not x else x),
+        Txn2TableColMap('trade_date_original', 'trade_date_original'),
+    ]
+
+    def create(self, transactions: Union[List[Transaction],Transaction]) -> int:
+        if isinstance(transactions, Transaction):
+            transactions = [transactions]
+
+        # Loop thru; produce list of dicts. Each will have keys matching table column names
+        table_ready_dicts = []
+        delete_stmts = []
+        now = datetime.datetime.now()
+        common_dict = {
+            'gendate': now,
+            'moddate': now,
+            'genuser': (f"{os.getlogin()}_{os.environ.get('APP_NAME') or os.path.basename(__file__)}")[:32],
+            'moduser': (f"{os.getlogin()}_{os.environ.get('APP_NAME') or os.path.basename(__file__)}")[:32],
+            'computer': socket.gethostname().upper()
+        }
+        for txn in transactions:
+            table_ready_dict = common_dict.copy()
+            for cm in reversed(self.txn2table_column_mappings):
+                # if hasattr(txn, cm.transaction_attribute):
+                # If the attribute exists for this transaction, populate the dict with its value
+                attr_value = getattr(txn, cm.transaction_attribute, None)
+
+                # # Round, if specified
+                # if cm.round_to_decimal_places and attr_value:
+                #     attr_value = normal_round(attr_value, cm.round_to_decimal_places)
+
+                # # Replace None with 0.0, if specified
+                # if cm.populate_none_with_zero and (not attr_value or pd.isna(attr_value)):
+                #     attr_value = 0.0
+
+                # Apply formatting function, if specified
+                if cm.txn2table_format_function:
+                    attr_value = cm.txn2table_format_function(attr_value)
+
+                # Assign value in dict
+                table_ready_dict[cm.table_column] = attr_value
+            
+            # Now we have the dict containing all desired values for the row. Append it:
+            table_ready_dicts.append(table_ready_dict)
+
+            # Also create & append delete stmt, if it's not already there:
+            delete_stmt = sql.delete(self.table.table_def)
+            delete_stmt = delete_stmt.where(self.table.c.portfolio_code == txn.portfolio_code)
+            delete_stmt = delete_stmt.where(self.table.c.trade_date_original == txn.trade_date_original)
+            if delete_stmt not in delete_stmts:
+                delete_stmts.append(delete_stmt)
+
+        # Now we have a list of dicts. Convert to df to facilitate bulk insert: 
+        df = pd.DataFrame(table_ready_dicts)
+
+        # Delete old results
+        for stmt in delete_stmts:
+            logging.debug(f'Deleting old results from {self.table.cn}... {str(stmt)}')
+            delete_res = self.table.execute_write(stmt)
+
+        # Bulk insert df
+        logging.info(f'Inserting {len(df)} new results to {self.table.cn}...')
+        res = self.table.bulk_insert(df)
+
+        # Reutrn row count
+        return res.rowcount
+
+
+    def get(self, portfolio_code: Union[str,None]=None, trade_date: Union[datetime.date, Tuple[datetime.date, datetime.date], None]=None) -> List[Transaction]:
+        pass
 
