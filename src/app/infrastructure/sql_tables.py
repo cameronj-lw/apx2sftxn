@@ -400,7 +400,7 @@ class LWDBSFTransactionTable(BaseTable):
 	config_section = 'lwdb'
 	table_name = 'sf_transaction'
 
-	def read(self, portfolio_code=None, from_date=None, to_date=None):
+	def read(self, portfolio_code=None, from_date=None, to_date=None, data_handle=None):
 		"""
 		Read all entries, optionally with criteria
 
@@ -413,6 +413,8 @@ class LWDBSFTransactionTable(BaseTable):
 			stmt = stmt.where(self.c.trade_date__c >= from_date) if to_date else stmt.where(self.c.trade_date__c == from_date)
 		if to_date is not None:
 			stmt = stmt.where(self.c.trade_date__c <= to_date) if from_date else stmt.where(self.c.trade_date__c == to_date)
+		if data_handle is not None:
+			stmt = stmt.where(self.c.data_handle == data_handle)
 		return self.execute_read(stmt)
 
 
@@ -598,7 +600,7 @@ class COREDBSFTransactionTable(BaseTable):
 	config_section = 'coredb'
 	table_name = 'sf_transaction'
 
-	def read(self, portfolio_code=None, from_date=None, to_date=None):
+	def read(self, portfolio_code=None, from_date=None, to_date=None, data_handle=None):
 		"""
 		Read all entries, optionally with criteria
 
@@ -611,6 +613,8 @@ class COREDBSFTransactionTable(BaseTable):
 			stmt = stmt.where(self.c.trade_date__c >= from_date) if to_date else stmt.where(self.c.trade_date__c == from_date)
 		if to_date is not None:
 			stmt = stmt.where(self.c.trade_date__c <= to_date) if from_date else stmt.where(self.c.trade_date__c == to_date)
+		if data_handle is not None:
+			stmt = stmt.where(self.c.data_handle == data_handle)
 		return self.execute_read(stmt)
 
 

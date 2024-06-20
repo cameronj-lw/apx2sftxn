@@ -18,7 +18,7 @@ from domain.repositories import SupplementaryRepository, TransactionRepository, 
 
 @dataclass
 class TransactionProcessingEngine(ABC):
-    source_queue_repo: Optional[TransactionProcessingQueueRepository]=None  # we'll read from this queue to detect new transactions for processing, and update status post-processing
+    source_queue_repo: TransactionProcessingQueueRepository  # we'll read from this queue to detect new transactions for processing, and update status post-processing
     target_txn_repos: List[TransactionRepository]  # we'll save results here
     target_queue_repos: List[TransactionProcessingQueueRepository]  # we'll save as PENDING queue_status here
 
@@ -108,7 +108,6 @@ class LWTransactionSummaryEngine(TransactionProcessingEngine):
     dividends_repo: TransactionRepository  # We'll separately pull dividends from here
     preprocessing_supplementary_repos: List[SupplementaryRepository]  # We'll supplement with data from these
     prev_bday_cost_repo: SupplementaryRepository  # To retrieve cost info if needed
-    postprocessing_supplementary_repos: List[SupplementaryRepository]  # We'll supplement with data from these
     # transaction_name_repo: SupplementaryRepository  # To get transaction names, at the end
     # historical_transaction_repo: TransactionRepository  # We'll query from this when needed, to find historical transactions
 
@@ -250,7 +249,7 @@ class LWTransactionSummaryEngine(TransactionProcessingEngine):
         txn.PricePerUnitLocal = txn.UnitPriceLocal
         if not hasattr(txn, 'FxRate'):
             txn.FxRate = txn.TradeDateFX
-        if hasattr(txn, 'ISOCode'):  # TODO: will need to populate ISOCode, even for non-FX txns
+        if hasattr(txn, 'ISOCode'):  # TODO: will need to populate ISOCode, even for non-FX txns?
             txn.TradeCcy = txn.ISOCode
             txn.SecCcy = txn.ISOCode
         txn.RptCcy = txn.ReportingCurrencyCode
@@ -358,6 +357,77 @@ class LWTransactionSummaryEngine(TransactionProcessingEngine):
                 txn.Name4Stmt1 = 'Interest Received'
             if not txn.Name4Trading1:
                 txn.Name4Trading1 = 'Interest Received'
+
+    def net_deposits_withdrawals(self, transactions: List[Transaction]) -> List[Transaction]:
+        # APXTxns.pm line 1411-1456 and APXTxns.pm::build_txn_grouping_for_report
+        group_by_fields = ['TradeCcy', 'PortfolioCode', 'Symbol', 'SecurityId', 'TradeDate', 'SettleDate', 'Comment01']
+        wd_reverse_fields = ['Quantity', 'TradeAmount', 'Commission', 'Taxes', 'Charges', 'TradeAmountLocal']
+        sum_fields = ['Quantity', 'TradeAmount', 'TradeAmountLocal', 'Commission', 'Taxes', 'Charges', 'RealizedGain'
+                        , 'NetInterest', 'NetDividend', 'NetEligDividend', 'NetNonEligDividend', 'NetFgnIncome'
+                        , 'CapGainsDistrib', 'RetOfCapital', 'TotalIncome', 'TfsaContribAmt', 'RspContribAmt']
+        group_sums = {}
+        
+        # Loop through transactions. Get sums, grouping by desired fields
+        for txn in transactions:
+            if txn.TransactionCode == 'wd':  # withdrawal -> multiple values by -1
+                for rf in wd_reverse_fields:
+                    # multiply by -1
+                    new_val = getattr(txn, rf, 0.0) * -1.0
+                    setattr(txn, rf, new_val)
+            elif txn.TransactionCode != 'dp': 
+                continue  # Only dp/wd are relevant
+
+            # Now we have a dp/wd which has reversed value if it is a withdrawal.
+            # Therefore we are ready to apply the values to the group_sums:
+            group_key_dict = {gbf: getattr(txn, gbf, None) for gbf in group_by_fields}
+            group_key = frozenset(group_key_dict.items())  # use frozenset since a dict is unhashable
+            if group_key in group_sums:
+                # There are already possibly some pre-existing values for this group_key -> need to add this txn's values to them
+                for sf in sum_fields:
+                    group_sums[group_key][sf] += getattr(txn, sf, 0.0)
+            else:
+                # There are not already pre-existing values for this group_key -> need to create them
+                # Start with an exact dict with all transaction attributes
+                group_sums[group_key] = txn.__dict__  # {sf: getattr(txn, sf, 0.0) for sf in sum_fields}
+                
+                # Any given sum fields may be none (or the transaction may not have this attribute).
+                # This would cause issues when attempting to add to them later on.
+                # To mitigate this, re-assign from None to 0.0:
+                for sf in sum_fields:
+                    if not getattr(txn, sf, None):
+                        setattr(txn, sf, 0.0)
+
+        # Now we have gone through all dp/wd's and recorded the grouped sums in group_sums
+        
+        # 1. Remove the dp/wd's, since we no longer need them: 
+        transactions = [t for t in transactions if t.TransactionCode not in ('dp', 'wd')]
+
+        for group_key, group_txn_with_sums in group_sums.items():
+
+            group_key_dict = dict(group_key)
+            
+            # 2. Add deposits for any grouped sums with positive trade amounts
+            if group_txn_with_sums.get('TradeAmount', 0.0) > 0.0:
+                group_txn_with_sums['TransactionCode'] = 'dp'
+                group_txn_with_sums['TransactionName'] = 'Contribution'
+                aggregate_deposit_txn = Transaction(**group_txn_with_sums)
+                transactions.append(aggregate_deposit_txn)
+
+            # 3. Add withdrawals for any grouped sums with negative trade amounts
+            if group_txn_with_sums.get('TradeAmount', 0.0) < 0.0:
+                # Negative trade amount -> withdrawal 
+                group_txn_with_sums['TransactionCode'] = 'wd'
+                group_txn_with_sums['TransactionName'] = 'Withdrawal'
+
+                # It's expected that other values will be negative; we want to change them to their absolute value:
+                for sf in sum_fields:
+                    abs_val = abs(group_txn_with_sums.get(sf, 0.0))
+                    group_txn_with_sums[sf] = abs_val
+
+                aggregate_withdrawal_txn = Transaction(**group_txn_with_sums)
+                transactions.append(aggregate_withdrawal_txn)
+
+        return transactions  # TODO: ideally figure out why we need to return this in order to get the new (modified) list of transactions
 
     def remove_price_and_quantity(self, txn: Transaction):  
         # APXTxns.pm line 1485-1491
@@ -719,8 +789,10 @@ class LWTransactionSummaryEngine(TransactionProcessingEngine):
         # 101. loop through resulting transactions to consolidate contributions/withdrawals by Trade Date and Portfolio.
                 # Determine if the result is a net withdrawal or contribution and label it appropriately.
 
-        # APXTxns.pm line 1410 and APXTxns.pm::build_txn_grouping_for_report
-        # TODO: figure out whether implementing this is needed...
+        # APXTxns.pm line 1410-1456 and APXTxns.pm::build_txn_grouping_for_report
+        transactions = self.net_deposits_withdrawals(transactions)  
+        # TODO: ideally figure out why we need to return the list in order to get the new (modified) list of transactions
+        # In theory, the list passed as a parameter makes the parameter mutable, so it should retain any modifications...
 
         # 102. Final "cleanups":
         # Use a separate for loop than above, because we do want new txns to be included
@@ -840,6 +912,8 @@ class LWAPX2SFTransactionEngine(TransactionProcessingEngine):
                 if apx_portf_ccy_iso != sf_portf_ccy_iso:
                     warn_msg = f'{txn.PortfolioCode} ({apx_portf_ccy_iso}): APX vs SF MISMATCH on portfolio reporting currency, using SF ({sf_portf_ccy_iso})'
                     logging.error(warn_msg)
+                    txn.WarnCode = 1
+                    txn.Warning = warn_msg
                     # TODO_EH: further error handling here? 
 
             # apx2sf.pl line 2892-2897: Check for APX vs SF mismatch in stmt group currency
@@ -847,6 +921,8 @@ class LWAPX2SFTransactionEngine(TransactionProcessingEngine):
                 if apx_group_ccy_iso != sf_group_ccy_iso:
                     warn_msg = f'{txn.PortfolioCode} ({apx_group_ccy_iso}): APX vs SF MISMATCH on stmt group reporting currency, using SF ({sf_group_ccy_iso})'
                     logging.error(warn_msg)
+                    txn.WarnCode = 1
+                    txn.Warning = warn_msg
                     # TODO_EH: further error handling here? 
 
             self.assign_trade_amt_cash_flow_firm_ccy(txn, portfolio2firm_fx_rate)
