@@ -134,7 +134,7 @@ class APXRepDBSecurityHashInMemoryRepository(InMemorySingletonSQLRepository):
 class APXDBvPortfolioInMemoryRepository(InMemorySingletonSQLRepository):    
     def __init__(self):
         super().__init__(pk_columns=[PKColumnMapping('PortfolioBaseID', 'PortfolioID')], sql_source=APXDBvPortfolioView
-                            , relevant_columns=['PortfolioTypeCode'])
+                            , relevant_columns=['PortfolioCode', 'PortfolioTypeCode'])
     
 class APXDBvPortfolioBaseInMemoryRepository(InMemorySingletonSQLRepository):
     def __init__(self):

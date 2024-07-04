@@ -13,6 +13,7 @@ from typing import List, Optional, Union
 # native
 from application.exceptions import TransactionShouldBeAddedException, TransactionShouldBeRemovedException
 from domain.models import QueueStatus, Transaction, TransactionProcessingQueueItem
+from domain.python_tools import get_current_callable
 from domain.repositories import SupplementaryRepository, TransactionRepository, TransactionProcessingQueueRepository
 
 
@@ -89,11 +90,13 @@ class StraightThruTransactionProcessingEngine(TransactionProcessingEngine):
         logging.info(f'{self.cn} processing {queue_item}')
         res_transactions = self.source_txn_repo.get(portfolio_code=queue_item.portfolio_code, trade_date=queue_item.trade_date)
         
-        # Populate the portfolio_code, modified_by, trade_date
+        # Populate the portfolio_code, modified_by, trade_date, lineage
         for txn in res_transactions:
             txn.portfolio_code = queue_item.portfolio_code
             txn.trade_date = queue_item.trade_date
             txn.modified_by = f"{os.environ.get('APP_NAME')}_{str(self)}"
+            txn.add_lineage(f"{str(self.source_txn_repo)}"
+                                , source_callable=get_current_callable())
 
         return res_transactions
 
@@ -104,8 +107,9 @@ class StraightThruTransactionProcessingEngine(TransactionProcessingEngine):
 @dataclass
 class LWTransactionSummaryEngine(TransactionProcessingEngine):
     """ Generate LW Transaction Summary. See http://lwweb/wiki/bin/view/Systems/ApxSmes/LWTransactionCustomization """
+    # TODO_CLEANUP: remove unneeded attributes below
     source_txn_repo: TransactionRepository  # We'll initially pull the transactions from here
-    dividends_repo: TransactionRepository  # We'll separately pull dividends from here
+    # dividends_repo: TransactionRepository  # We'll separately pull dividends from here
     preprocessing_supplementary_repos: List[SupplementaryRepository]  # We'll supplement with data from these
     prev_bday_cost_repo: SupplementaryRepository  # To retrieve cost info if needed
     # transaction_name_repo: SupplementaryRepository  # To get transaction names, at the end
@@ -116,18 +120,25 @@ class LWTransactionSummaryEngine(TransactionProcessingEngine):
         for txn in transactions:
             txn.trade_date_original = txn.TradeDate  # Since for dividends, we may change the TradeDate later
             for sr in self.preprocessing_supplementary_repos:
-                sr.supplement(txn)
+                if supplemental_data := sr.supplement(txn):
+                    column_mappings_str = [f'{cm.supplementary_column_name}={getattr(txn, cm.transaction_column_name)}' 
+                                                for cm in sr.pk_columns]
+                    txn.add_lineage(f"Supplemented by {sr.cn}, based on ({', '.join(column_mappings_str)})"
+                                        , source_callable=get_current_callable())
 
     def assign_fx_rate(self, txn: Transaction):
         # APXTxns.pm line 721-734: assign fx rate
         if txn.TradeDateFX and isinstance(txn.TradeDateFX, numbers.Number) and not math.isnan(txn.TradeDateFX):
             txn.FxRate = txn.TradeDateFX
+            txn.add_lineage(f"Assigned FxRate, based on TradeDateFX {txn.TradeDateFX}", source_callable=get_current_callable())
         elif txn.PrincipalCurrencyISOCode1 == txn.ReportingCurrencyISOCode:
             txn.FxRate = 1.0
+            txn.add_lineage(f"Assigned FxRate as 1.0, based on PrincipalCurrencyISOCode1 = ReportingCurrencyISOCode = {txn.ReportingCurrencyISOCode}", source_callable=get_current_callable())
         elif txn.TradeAmount and txn.TradeAmountLocal:
             txn.FxRate = txn.TradeAmount / txn.TradeAmountLocal
+            txn.add_lineage(f"Assigned FxRate, based on TradeAmount / TradeAmountLocal = {txn.TradeAmount} / {txn.TradeAmountLocal} = {txn.FxRate}", source_callable=get_current_callable())
 
-    def massage_deposits_withwrawals(self, txn: Transaction):
+    def massage_deposits_withdrawals(self, txn: Transaction):
 
     # 2. Client deposits(withdrawals):
         # Flip symbol if required to indicate source(destination) as client
@@ -135,9 +146,11 @@ class LWTransactionSummaryEngine(TransactionProcessingEngine):
 
         if txn.Symbol2.lower() in ('client'):
             # Assign sec1 fields from sec2:
-            for col in ['Symbol', 'SecurityID', 'ProprietarySymbol', 'PrincipalCurrencyCode', 'FullName', 'Name4Stmt', 'Name4Trading']:
+            cols_to_copy = ['Symbol', 'SecurityID', 'ProprietarySymbol', 'PrincipalCurrencyCode', 'FullName', 'Name4Stmt', 'Name4Trading']
+            for col in cols_to_copy:
                 sec2_value = getattr(txn, f'{col}2')
                 setattr(txn, f'{col}1', sec2_value)
+            txn.add_lineage(f"Client deposit/withdrawal -> copied the following values from security2 to security1: {', '.join(cols_to_copy)}", source_callable=get_current_callable())
                 
     # 3. Taxes:
         # combine multiple transactions in APX through wash securities into single transactions
@@ -145,10 +158,14 @@ class LWTransactionSummaryEngine(TransactionProcessingEngine):
         elif txn.Symbol2.lower() in ('whnrtax', 'whfedtax'):
             # Make txn code as wt 
             txn.TransactionCode = 'wt'
+            txn.add_lineage(f"Symbol2 is {txn.Symbol2.lower()} -> updated TransactionCode to wt", source_callable=get_current_callable())
+
             # Assign sec1 fields from sec2:
-            for col in ['SecurityID', 'ProprietarySymbol', 'PrincipalCurrencyCode', 'FullName', 'Name4Stmt', 'Name4Trading']:
+            cols_to_copy = ['Symbol', 'SecurityID', 'ProprietarySymbol', 'PrincipalCurrencyCode', 'FullName', 'Name4Stmt', 'Name4Trading']
+            for col in cols_to_copy:
                 sec2_value = getattr(txn, f'{col}2')
                 setattr(txn, f'{col}1', sec2_value)
+            txn.add_lineage(f"Symbol2 is {txn.Symbol2.lower()} -> copied the following values from security2 to security1: {', '.join(cols_to_copy)}", source_callable=get_current_callable())
         elif txn.Symbol1.lower() in ('whnrtax', 'whfedtax', 'dvshrt', 'dvwash', 'lw.mfr'):
             raise TransactionShouldBeRemovedException(txn)
 
@@ -159,15 +176,18 @@ class LWTransactionSummaryEngine(TransactionProcessingEngine):
             if txn.SecurityID2 is None:
                 raise TransactionShouldBeRemovedException(txn)
             elif txn.TransactionCode in ('dp', 'wd'):
+                txn.add_lineage(f"{txn.TransactionCode} for Symbol1 {txn.Symbol1} -> changed TransactionCode to ep", source_callable=get_current_callable())
                 txn.TransactionCode = 'ep'
         elif txn.Symbol1.lower() in ('cust'):
             if txn.TransactionCode in ('dp', 'wd'):
+                txn.add_lineage(f"{txn.TransactionCode} for Symbol1 {txn.Symbol1} -> changed TransactionCode to ex", source_callable=get_current_callable())
                 txn.TransactionCode = 'ex'
         elif txn.Symbol1 == 'cash' and txn.SecTypeBaseCode2 == 'aw':
             raise TransactionShouldBeRemovedException(txn)
         elif txn.Symbol1 == 'income' and txn.SecurityID2 is None and txn.SecTypeBaseCode2 == 'aw':
             raise TransactionShouldBeRemovedException(txn)
         elif txn.Symbol1 == 'income' and txn.Symbol2 == 'cash' and txn.SecTypeBaseCode2 == 'aw':
+            txn.add_lineage(f"{txn.TransactionCode} for Symbol1 {txn.Symbol1} to Symbol2 {txn.Symbol2} -> changed Symbol1 to client", source_callable=get_current_callable())
             txn.Symbol1 = 'client'
         else:
             raise TransactionShouldBeRemovedException(txn)
@@ -177,9 +197,13 @@ class LWTransactionSummaryEngine(TransactionProcessingEngine):
         if txn.OriginalCostLocalCurrency:
             txn.LocalCostBasis = txn.OriginalCostLocalCurrency
             txn.LocalCostPerUnit = (txn.OriginalCostLocalCurrency / txn.Quantity if txn.Quantity else 0)
+            txn.add_lineage(f"{txn.TransactionCode} -> assigned LocalCostBasis as OriginalCostLocalCurrency = {txn.LocalCostBasis}", source_callable=get_current_callable())
+            txn.add_lineage(f"{txn.TransactionCode} -> assigned LocalCostPerUnit as OriginalCostLocalCurrency/Quantity = {txn.OriginalCostLocalCurrency}/{txn.Quantity} = {txn.LocalCostPerUnit}", source_callable=get_current_callable())
         if txn.OriginalCost:
             txn.RptCostBasis = txn.OriginalCost
             txn.RptCostPerUnit = (txn.OriginalCost / txn.Quantity if txn.Quantity else 0)
+            txn.add_lineage(f"{txn.TransactionCode} -> assigned RptCostBasis as OriginalCost = {txn.RptCostBasis}", source_callable=get_current_callable())
+            txn.add_lineage(f"{txn.TransactionCode} -> assigned RptCostPerUnit as OriginalCost/Quantity = {txn.OriginalCost}/{txn.Quantity} = {txn.RptCostPerUnit}", source_callable=get_current_callable())
 
     def attribute_distribution(self, txn: Transaction):
         # APXTxns.pm line 1027-1133 are irrelevant, since distribution breakdowns were stopped asof June 30, 2023
@@ -193,6 +217,8 @@ class LWTransactionSummaryEngine(TransactionProcessingEngine):
             txn.UnitPrice = 0.0
             txn.UnitPriceLocal = 0.0
 
+            txn.add_lineage(f"{txn.TransactionCode} -> assigned NetInterest and TotalIncome as TradeAmount={txn.TradeAmount}; zeroed out Quantity, UnitPrice, UnitPriceLocal", source_callable=get_current_callable())
+
         elif txn.TransactionCode in ('dv'):
             txn.TotalIncome = txn.TradeAmount
             
@@ -201,12 +227,16 @@ class LWTransactionSummaryEngine(TransactionProcessingEngine):
             txn.UnitPrice = 0.0
             txn.UnitPriceLocal = 0.0
 
+            txn.add_lineage(f"{txn.TransactionCode} -> assigned TotalIncome as TradeAmount={txn.TradeAmount}; zeroed out Quantity, UnitPrice, UnitPriceLocal", source_callable=get_current_callable())
+
             if txn.PrincipalCurrencyISOCode1 == 'CAD': 
                 # TODO: what's so special about CAD for this? i.e. what if it's a non-CAD portfolio?
                 txn.NetDividend = txn.TradeAmount
                 txn.NetEligDividend = txn.TradeAmount
+                txn.add_lineage(f"{txn.TransactionCode} in CAD security1 -> assigned NetDividend and NetEligDividend as TradeAmount={txn.TradeAmount}", source_callable=get_current_callable())
             else:
                 txn.NetFgnIncome = txn.TradeAmount
+                txn.add_lineage(f"{txn.TransactionCode} in non-CAD security1 -> assigned NetFgnIncome as TradeAmount={txn.TradeAmount}", source_callable=get_current_callable())
 
     def assign_contribution_amount(self, txn: Transaction):
 
@@ -216,12 +246,14 @@ class LWTransactionSummaryEngine(TransactionProcessingEngine):
         if 'RRSP' in txn.PortfolioTypeCode:
             if txn.TransactionCode == 'dp' and txn.Symbol2 == 'client' and txn.Comment01 == 'CONTRIBUTION':
                 txn.RspContribAmt = txn.TradeAmount
+                txn.add_lineage(f"RRSP {txn.TransactionCode} -> assigned RspContribAmt as TradeAmount={txn.TradeAmount}", source_callable=get_current_callable())
     
     # 14. if transaction is a withdrawal to an 'RRSP' type portfolio then amount is considered an RSP withdrawal for reporting purposes
             # EXCEPT if the transaction is pre 14Aug2015 and has a comment with the string 'EXCLUDE'. This is/was a hack to support backwards compatibility when the Private Client team changed some workflows.
 
             elif txn.TransactionCode == 'wd' and txn.Symbol1 == 'client' and txn.Comment01 == 'CONTRIBUTION':
                 txn.RspContribAmt = txn.TradeAmount
+                txn.add_lineage(f"RRSP {txn.TransactionCode} -> assigned RspContribAmt as TradeAmount={txn.TradeAmount}", source_callable=get_current_callable())
 
     # 15. if transaction is a deposit to an 'TFSA' type portfolio then amount is considered an TFSA contribution for reporting purposes
             # EXCEPT if the transaction is pre 14Aug2015 and has a comment with the string 'EXCLUDE'. This is/was a hack to support backwards compatibility when the Private Client team changed some workflows.
@@ -229,12 +261,14 @@ class LWTransactionSummaryEngine(TransactionProcessingEngine):
         if 'TFSA' in txn.PortfolioTypeCode:
             if txn.TransactionCode == 'dp' and txn.Symbol2 == 'client' and txn.Comment01 == 'CONTRIBUTION':
                 txn.TfsaContribAmt = txn.TradeAmount
+                txn.add_lineage(f"TFSA {txn.TransactionCode} -> assigned TfsaContribAmt as TradeAmount={txn.TradeAmount}", source_callable=get_current_callable())
 
     # 16. if transaction is a withdrawal to an 'TFSA' type portfolio then amount is considered an TFSA withdrawal for reporting purposes
             # EXCEPT if the transaction is pre 14Aug2015 and has a comment with the string 'EXCLUDE'. This is/was a hack to support backwards compatibility when the Private Client team changed some workflows.
 
             elif txn.TransactionCode == 'wd' and txn.Symbol1 == 'client' and txn.Comment01 == 'CONTRIBUTION':
                 txn.TfsaContribAmt = txn.TradeAmount   
+                txn.add_lineage(f"TFSA {txn.TransactionCode} -> assigned TfsaContribAmt as TradeAmount={txn.TradeAmount}", source_callable=get_current_callable())
 
     def add_fields(self, txn: Transaction):
     # APXTxns.pm line 1259-1317: Add fields (just putting here to replicate ordering in APXTxns.pm)
@@ -249,32 +283,49 @@ class LWTransactionSummaryEngine(TransactionProcessingEngine):
         txn.PricePerUnitLocal = txn.UnitPriceLocal
         if not hasattr(txn, 'FxRate'):
             txn.FxRate = txn.TradeDateFX
+            txn.add_lineage(f"Assigned FxRate as TradeDateFX={txn.TradeDateFX}", source_callable=get_current_callable())
         if hasattr(txn, 'ISOCode'):  # TODO: will need to populate ISOCode, even for non-FX txns?
             txn.TradeCcy = txn.ISOCode
             txn.SecCcy = txn.ISOCode
+            txn.add_lineage(f"Assigned TradeCcy and SecCcy as ISOCode={txn.ISOCode}", source_callable=get_current_callable())
         txn.RptCcy = txn.ReportingCurrencyCode
         # TODO: Need IncomeCcy? Convert PrincipalCurrencyCode1 to ISO?
         if hasattr(txn, 'RptCostBasis'):
             txn.CostBasis = txn.RptCostBasis 
+            txn.add_lineage(f"Assigned CostBasis as RptCostBasis={txn.RptCostBasis}", source_callable=get_current_callable())
         if hasattr(txn, 'RptCostPerUnit'):
             txn.CostPerUnit = txn.RptCostPerUnit 
+            txn.add_lineage(f"Assigned CostPerUnit as RptCostPerUnit={txn.RptCostPerUnit}", source_callable=get_current_callable())
         if hasattr(txn, 'LocalCostBasis'):
             txn.CostBasisLocal = txn.LocalCostBasis 
+            txn.add_lineage(f"Assigned CostBasisLocal as LocalCostBasis={txn.LocalCostBasis}", source_callable=get_current_callable())
         if hasattr(txn, 'LocalCostPerUnit'):
             txn.CostPerUnitLocal = txn.LocalCostPerUnit 
+            txn.add_lineage(f"Assigned CostPerUnitLocal as LocalCostPerUnit={txn.LocalCostPerUnit}", source_callable=get_current_callable())
         if hasattr(txn, 'RealizedGainLoss'):
             txn.RealizedGain = txn.RealizedGainLoss 
+            txn.add_lineage(f"Assigned RealizedGain as RealizedGainLoss={txn.RealizedGainLoss}", source_callable=get_current_callable())
         txn.BrokerName = txn.BrokerFirmName
         txn.BrokerID = txn.BrokerFirmSymbol
         if not hasattr(txn, 'LocalTranKeySuffix'):
             txn.LocalTranKeySuffix = '_A'
+            txn.add_lineage(f"Assigned LocalTranKeySuffix as default=_A", source_callable=get_current_callable())
         txn.LocalTranKey = f"{txn.PortfolioCode}_{txn.TradeDate.strftime('%Y%m%d')}_{txn.SettleDate.strftime('%Y%m%d')}_{txn.Symbol}_{txn.PortfolioTransactionID}_{txn.TranID}_{txn.LotNumber}{txn.LocalTranKeySuffix}"
         txn.SecTypeCode1 = f'{txn.SecTypeBaseCode1}{txn.PrincipalCurrencyCode1}'
         txn.SecTypeCode2 = f'{txn.SecTypeBaseCode2}{txn.PrincipalCurrencyCode2}'
         if hasattr(txn, 'FedTaxWithheld'):
             txn.WhFedTaxAmt = txn.FedTaxWithheld 
+            txn.add_lineage(f"Assigned WhFedTaxAmt as FedTaxWithheld={txn.FedTaxWithheld}", source_callable=get_current_callable())
         if hasattr(txn, 'FgnTaxPaid'):
             txn.WhNrTaxAmt = txn.FgnTaxPaid 
+            txn.add_lineage(f"Assigned WhNrTaxAmt as FgnTaxPaid={txn.FgnTaxPaid}")
+        txn.add_lineage(f"Assigned fields: PortfolioName as ReportHeading1={txn.ReportHeading1}, AsOfDate as TradeDate={txn.TradeDate}, " 
+                            f"SecurityID as SecurityID1={txn.SecurityID1}, LWID as ProprietarySymbol1={txn.ProprietarySymbol1}, Symbol as Symbol1={txn.Symbol1}, " 
+                            f"PricePerUnit as UnitPrice={txn.UnitPrice}, PricePerUnitLocal as UnitPriceLocal={txn.UnitPriceLocal}, RptCcy as ReportingCurrencyCode={txn.ReportingCurrencyCode}, " 
+                            f"BrokerName as BrokerFirmName={txn.BrokerFirmName}, BrokerID as BrokerFirmSymbol={txn.BrokerFirmSymbol}, LocalTranKey as {txn.LocalTranKey}, " 
+                            f"SecTypeCode1 as SecTypeBaseCode1+PrincipalCurrencyCode1={txn.SecTypeCode1}, SecTypeCode2 as SecTypeBaseCode2+PrincipalCurrencyCode2={txn.SecTypeCode2}" 
+                            , source_callable=get_current_callable()
+        )
 
     def massage_fi_maturities(self, txn: Transaction):
         if txn.TransactionCode == 'sl':
@@ -310,17 +361,28 @@ class LWTransactionSummaryEngine(TransactionProcessingEngine):
                     new_txn.TotalIncome = income
                     new_txn.LocalTranKeySuffix = '_A_B'
                     new_txn.LocalTranKey = f"{new_txn.PortfolioCode}_{new_txn.TradeDate.strftime('%Y%m%d')}_{new_txn.SettleDate.strftime('%Y%m%d')}_{new_txn.Symbol1}_{new_txn.PortfolioTransactionID}_{new_txn.TranID}_{new_txn.LotNumber}{new_txn.LocalTranKeySuffix}"
-
+                    new_txn.add_lineage(f"*** Created as the interest component of {txn.LocalTranKey} ***", source_callable=get_current_callable())
+                    txn.add_lineage(f"sl of ST {txn.Symbol1} -> carved out interest component as separate transaction ({new_txn.LocalTranKey})", source_callable=get_current_callable())
+                    
                     # APXTxns.pm line 1362-1372: clean up the parent txn for maturities
                     txn.RealizedGain = txn.TradeAmount - txn.RptCostBasis - income
+                    txn.add_lineage(f"Assigned RealizedGain as TradeAmount-RptCostBasis-(TradeAmountLocal-LocalCostBasis)*fx_rate = "
+                                        f"{txn.TradeAmount}-{txn.RptCostBasis}-({txn.TradeAmountLocal}-{txn.LocalCostBasis})*{fx_rate}"
+                                        , source_callable=get_current_callable()
+                    )
                     if txn.TradeDate >= txn.MaturityDate1:
                         txn.PricePerUnit = 100.0
                         txn.TradeAmount = txn.RptCostBasis
                         txn.TransactionCode = 'mt'
                         txn.RealizedGain = 0.0
+                        txn.add_lineage(f"Detected as maturity since TradeDate ({txn.TradeDate}) >= MaturityDate1 ({txn.MaturityDate1}) -> assigned PricePerUnit as 100.0, zeroed RealizedGain, "
+                                            f"assigned TradeAmount as RptCostBasis={txn.RptCostBasis}, assigned TransactionCode as mt"
+                                            , source_callable=get_current_callable()
+                        )
                     else:
                         txn.TradeAmount = txn.TradeAmount - income
                         txn.TradeAmountLocal = txn.TradeAmount - income_local
+                        txn.add_lineage(f"Subtracted income ({income}) from TradeAmount and income_local ({income_local}) from TradeAmountLocal", source_callable=get_current_callable())
 
                     raise TransactionShouldBeAddedException(new_txn)
                 else:
@@ -329,6 +391,7 @@ class LWTransactionSummaryEngine(TransactionProcessingEngine):
                 if txn.MaturityDate1:
                     if txn.TradeDate >= txn.MaturityDate1:
                         txn.TransactionCode = 'mt'  # maturity
+                        txn.add_lineage(f"Detected as maturity since TradeDate ({txn.TradeDate}) >= MaturityDate1 ({txn.MaturityDate1}) -> assigned TransactionCode as mt", source_callable=get_current_callable())
 
     def massage_names_for_cash(self, txn: Transaction):
         # if the APX transaction is a long-out of a holding in a cash security then change it to a 'Cash Transfer Withdrawal'
@@ -337,8 +400,10 @@ class LWTransactionSummaryEngine(TransactionProcessingEngine):
         if txn.TransactionCode == 'lo' and txn.Symbol1 == 'cash':
             if not txn.Name4Stmt: 
                 txn.Name4Stmt = 'Cash Transfer Withdrawal'
+                txn.add_lineage(f"lo of cash -> assigned Name4Stmt as Cash Transfer Withdrawal", source_callable=get_current_callable())
             if not txn.Name4Trading: 
                 txn.Name4Trading = 'Cash Transfer Withdrawal'
+                txn.add_lineage(f"lo of cash -> assigned Name4Trading as Cash Transfer Withdrawal", source_callable=get_current_callable())
 
         # if the APX transaction is a long-in of a holding in a cash security then change it to a 'Cash Transfer Deposit'
         
@@ -346,8 +411,10 @@ class LWTransactionSummaryEngine(TransactionProcessingEngine):
         if txn.TransactionCode == 'li' and txn.Symbol1 == 'cash':
             if not txn.Name4Stmt: 
                 txn.Name4Stmt = 'Cash Transfer Deposit'
+                txn.add_lineage(f"li of cash -> assigned Name4Stmt as Cash Transfer Deposit", source_callable=get_current_callable())
             if not txn.Name4Trading: 
                 txn.Name4Trading = 'Cash Transfer Deposit'
+                txn.add_lineage(f"li of cash -> assigned Name4Trading as Cash Transfer Deposit", source_callable=get_current_callable())
 
         # if the APX transaction is an interest payment of cash then change it to 'Interest Received'
 
@@ -355,8 +422,10 @@ class LWTransactionSummaryEngine(TransactionProcessingEngine):
         if txn.TransactionCode == 'in' and txn.Symbol1 == 'cash':
             if not txn.Name4Stmt1: 
                 txn.Name4Stmt1 = 'Interest Received'
+                txn.add_lineage(f"in of cash -> assigned Name4Stmt1 as Interest Received", source_callable=get_current_callable())
             if not txn.Name4Trading1:
                 txn.Name4Trading1 = 'Interest Received'
+                txn.add_lineage(f"in of cash -> assigned Name4Trading1 as Interest Received", source_callable=get_current_callable())
 
     def net_deposits_withdrawals(self, transactions: List[Transaction]) -> List[Transaction]:
         # APXTxns.pm line 1411-1456 and APXTxns.pm::build_txn_grouping_for_report
@@ -372,7 +441,7 @@ class LWTransactionSummaryEngine(TransactionProcessingEngine):
             if txn.TransactionCode == 'wd':  # withdrawal -> multiple values by -1
                 for rf in wd_reverse_fields:
                     # multiply by -1
-                    new_val = getattr(txn, rf, 0.0) * -1.0
+                    new_val = (getattr(txn, rf, 0.0) or 0.0) * -1.0
                     setattr(txn, rf, new_val)
             elif txn.TransactionCode != 'dp': 
                 continue  # Only dp/wd are relevant
@@ -385,10 +454,13 @@ class LWTransactionSummaryEngine(TransactionProcessingEngine):
                 # There are already possibly some pre-existing values for this group_key -> need to add this txn's values to them
                 for sf in sum_fields:
                     group_sums[group_key][sf] += getattr(txn, sf, 0.0)
+                # Also append the LocalTranKey (for lineage)
+                group_sums[group_key]['All_LocalTranKeys'].append(txn.LocalTranKey)
             else:
                 # There are not already pre-existing values for this group_key -> need to create them
                 # Start with an exact dict with all transaction attributes
                 group_sums[group_key] = txn.__dict__  # {sf: getattr(txn, sf, 0.0) for sf in sum_fields}
+                group_sums[group_key]['All_LocalTranKeys'] = [txn.LocalTranKey]
                 
                 # Any given sum fields may be none (or the transaction may not have this attribute).
                 # This would cause issues when attempting to add to them later on.
@@ -425,6 +497,11 @@ class LWTransactionSummaryEngine(TransactionProcessingEngine):
                     group_txn_with_sums[sf] = abs_val
 
                 aggregate_withdrawal_txn = Transaction(**group_txn_with_sums)
+                if len(aggregate_withdrawal_txn.All_LocalTranKeys) > 1:
+                    aggregate_withdrawal_txn.add_lineage(f"Combined the following dp/wd's which had matching {', '.join(group_by_fields)}: {', '.join(aggregate_withdrawal_txn.All_LocalTranKeys)}; "
+                                                            f"The following had their signs reversed for wd's: {', '.join(wd_reverse_fields)}; "
+                                                            f"The following were then summed: {', '.join(sum_fields)}"
+                    )
                 transactions.append(aggregate_withdrawal_txn)
 
         return transactions  # TODO: ideally figure out why we need to return this in order to get the new (modified) list of transactions
@@ -435,26 +512,33 @@ class LWTransactionSummaryEngine(TransactionProcessingEngine):
         # 102a. remove (blank) price per unit in local and reporting currency for a wide range of cash, fee, income, etc. types of transactions (dp, wd, ex, ep, wt, pa, sa, in, pd, rc)
         if hasattr(txn, 'PricePerUnit'):
             delattr(txn, 'PricePerUnit')
+            txn.add_lineage(f'{txn.TransactionCode} -> removed PricePerUnit', source_callable=get_current_callable())
         if hasattr(txn, 'PricePerUnitLocal'):
             delattr(txn, 'PricePerUnitLocal')
+            txn.add_lineage(f'{txn.TransactionCode} -> removed PricePerUnitLocal', source_callable=get_current_callable())
 
         # 102b. remove (blank) quantity for a wide range of cash, fee, income, etc. types of transactions (dp, wd, ex, ep, wt, pa, sa, in, pd, rc)
         if hasattr(txn, 'Quantity'):
             delattr(txn, 'Quantity')
+            txn.add_lineage(f'{txn.TransactionCode} -> removed Quantity', source_callable=get_current_callable())
+
 
     def zero_registered_contributions(self, txn: Transaction):
         # 102c. hack to verify that there are no withdrawals from RSP/TFSA types of account
         # APXTxns.pm line 1505-1511
         if 'TFSA' in txn.PortfolioTypeCode:
             txn.TfsaContribAmt = 0.0
+            txn.add_lineage(f'{txn.TransactionCode} in TFSA portfolio -> zeroed TfsaContribAmt', source_callable=get_current_callable())
         if 'RRSP' in txn.PortfolioTypeCode:
             txn.RspContribAmt = 0.0
+            txn.add_lineage(f'{txn.TransactionCode} in RRSP portfolio -> zeroed RspContribAmt', source_callable=get_current_callable())
 
     def assign_sec_columns(self, txn: Transaction):
         # Populate sec columns from Security1
         for col in ['FullName', 'Name4Stmt', 'Name4Trading']:
             if hasattr(txn, f'{col}1'):
                 setattr(txn, col, getattr(txn, f'{col}1'))
+                txn.add_lineage(f"Assigned {col} as {col}1={getattr(txn, f'{col}1')}", source_callable=get_current_callable())
 
     def assign_transaction_name(self, txn: Transaction):
         # APXTxns.pm::get_transaction_name
@@ -463,15 +547,19 @@ class LWTransactionSummaryEngine(TransactionProcessingEngine):
                 # TODO: better way of identifying equity/balanced/FI funds? At least move this to config?
                 if txn.Symbol1 in ('AVBF', 'DPA', 'DPB', 'IAFA', 'IAFB', 'IPFA', 'UDPA', 'UDPB', 'BFA', 'BFB', 'BFF', 'IAFF'):
                     txn.TransactionName = 'Distribution'
+                    txn.add_lineage(f"dv in lw security of balanced fund -> assigned TransactionName as Distribution", source_callable=get_current_callable())
                 elif txn.Symbol1 in ('CFIA', 'TRFA', 'TRFB', 'CPFIA', 'CPFIB', 'FIA', 'FIB', 'LTFA', 'MMF', 'TRLA', 
                                                 'CPPA', 'CPPB', 'HYA', 'HYAH', 'HYB', 'HYBH', 'CPBFA', 'CPFIF', 'HYF', 'HYFH', 
                                                 'MMA', 'USSMA', 'USSMB', 'USSMF', 'IBHA', 'IBHB', 'MCA', 'MCB', 'MCF', 
                                                 'STIFA', 'STIFB', 'STIFF', 'STIFI1', 'UMMA', 'UMMB', 'UMMF', 'TRFI1'):
                     txn.TransactionName = 'Interest Received'
+                    txn.add_lineage(f"dv in lw security of FI fund -> assigned TransactionName as Interest Received", source_callable=get_current_callable())
                 else:
                     txn.TransactionName = 'Dividend'
+                    txn.add_lineage(f"dv in lw security -> assigned TransactionName as Dividend", source_callable=get_current_callable())
             else:
                 txn.TransactionName = 'Dividend'
+                txn.add_lineage(f"dv -> assigned TransactionName as Dividend", source_callable=get_current_callable())
 
         elif txn.TransactionCode in ('by', 'bc'):
             txn.TransactionName = 'Purchase'
@@ -511,6 +599,9 @@ class LWTransactionSummaryEngine(TransactionProcessingEngine):
         
         else:
             txn.TransactionName = 'Unknown'  # pass  # TODO_EH: exception?
+
+        if txn.TransactionCode != 'dv':
+            txn.add_lineage(f"{txn.TransactionCode} -> assigned TransactionName as {txn.TransactionName}", source_callable=get_current_callable())
 
     def assign_section_and_stmt_tran(self, txn: Transaction):
         # apx2txnrpts.pl line 1414-1421
@@ -572,7 +663,9 @@ class LWTransactionSummaryEngine(TransactionProcessingEngine):
             txn.SectionDesc = 'Adjust Cost'
             txn.StmtTranDesc = 'Adjust Cost'
         else:
-            pass  # TODO_EH: exception?
+            return  # TODO_EH: exception?
+
+        txn.add_lineage(f"{txn.TransactionCode} -> assigned SectionDesc as {txn.SectionDesc}, StmtTranDesc as {txn.StmtTranDesc}", source_callable=get_current_callable())
 
     def null_fields_for_dv(self, txn: Transaction):
         # apx2txnrpts.pl line 1423-1426
@@ -584,26 +677,31 @@ class LWTransactionSummaryEngine(TransactionProcessingEngine):
             txn.CostPerUnitLocal = None
             txn.CostBasis = None
             txn.CostBasisLocal = None
+            txn.add_lineage(f"dv -> nulled out Quantity, PricePerUnit, PricePerUnitLocal, CostPerUnit, CostPerUnitLocal, CostBasis, CostBasisLocal", source_callable=get_current_callable())
 
     def reverse_amount_signs(self, txn: Transaction):
         # apx2txnrpts.pl line 1427-1435 + 1449-1458
         if txn.TransactionCode in ('lo', 'wd', 'ex', 'ep', 'wt'):
             txn.TradeAmount = -1.0 * txn.TradeAmount
             txn.TradeAmountLocal = -1.0 * txn.TradeAmountLocal
+            txn.add_lineage(f"{txn.TransactionCode} -> reversed signs for TradeAmount and TradeAmountLocal", source_callable=get_current_callable())
 
     def assign_name4stmt_for_client_wd_dp(self, txn: Transaction):
         # apx2txnrpts.pl line 1436-1448
         if txn.Symbol1 == 'client':
             if txn.TransactionCode == 'wd':
                 txn.Name4Stmt = 'CASH WITHDRAWAL'
+                txn.add_lineage(f"client wd -> assigned Name4Stmt as CASH WITHDRAWAL", source_callable=get_current_callable())
             elif txn.TransactionCode == 'dp':
                 txn.Name4Stmt = 'CASH DEPOSIT'
+                txn.add_lineage(f"client dp -> assigned Name4Stmt as CASH DEPOSIT", source_callable=get_current_callable())
 
     def unassign_gains_proceeds_quantity_if_zero(self, txn: Transaction):
         # apx2txnrpts.pl line 1459-1464
         for attr in ('RealizedGain', 'Proceeds', 'Quantity'):
             if not getattr(txn, attr, None):
                 setattr(txn, attr, None)  
+                txn.add_lineage(f"nulled out {attr}, since it was zero", source_callable=get_current_callable())
                 # TODO: Using setattr rather than delattr to make it traceable... 
                 # but perhaps delattr is more readable? And aligned better to the perl equivalent?
 
@@ -611,8 +709,10 @@ class LWTransactionSummaryEngine(TransactionProcessingEngine):
         # apx2txnrpts.pl line 1467-1478
         if txn.TransactionCode in ('by'):
             txn.CashFlow = -1.0 * txn.TradeAmount
+            txn.add_lineage(f"{txn.TransactionCode} -> set CashFlow as -1 * TradeAmount", source_callable=get_current_callable())
         else:
             txn.CashFlow = txn.TradeAmount
+            txn.add_lineage(f"{txn.TransactionCode} -> set CashFlow as TradeAmount", source_callable=get_current_callable())
 
     def assign_standard_attributes(self, txn: Transaction, queue_item: TransactionProcessingQueueItem):
         # Populate the portfolio_code, modified_by, trade_date
@@ -633,13 +733,21 @@ class LWTransactionSummaryEngine(TransactionProcessingEngine):
             transactions = source_transactions.copy()
             logging.info(f'{self.cn} found {len(transactions)} transactions from {self.source_txn_repo.cn}')
 
-        source_dividends = self.dividends_repo.get(portfolio_code=queue_item.portfolio_code, trade_date=queue_item.trade_date)
-        dividends = source_dividends.copy()
-        logging.info(f'{self.cn} found {len(dividends)} dividends from {self.dividends_repo.cn}')
+        # TODO_CLEANUP: remove below block, once confirmed not used
+        # source_dividends = self.dividends_repo.get(portfolio_code=queue_item.portfolio_code, trade_date=queue_item.trade_date)
+        # dividends = source_dividends.copy()
+        # logging.info(f'{self.cn} found {len(dividends)} dividends from {self.dividends_repo.cn}')
 
-        # Remove dividends from generic transactions, then append dividends
-        transactions = [t for t in transactions if t.TransactionCode != 'dv']
-        transactions.extend(dividends)
+        # # Remove dividends from generic transactions
+        # transactions = [t for t in transactions if t.TransactionCode != 'dv']
+
+        # # Remove transactions which were already "merged" into the dividends
+        # dividends_merged_transactions = []
+        # for d in dividends:
+        #     dividends_merged_transactions.extend(d.transactions_merged_in)
+        # transactions = [t for t in transactions if t not in dividends_merged_transactions]
+
+        # transactions.extend(dividends)
 
         # First, supplement with "pre-processing" supplementary repos, to get additional fields
         self.preprocessing_supplement(transactions)
@@ -679,7 +787,7 @@ class LWTransactionSummaryEngine(TransactionProcessingEngine):
 
                 # APXTxns.pm line 759-827
                 if txn.TransactionCode in ('dp', 'wd'):
-                    self.massage_deposits_withwrawals(txn)
+                    self.massage_deposits_withdrawals(txn)
                     
             # 5. Ignore/erase gains on dividends in foreign currency relative to reporting currency
                     # Background: LW configures APX to do gains/losses based on average cost. This creates realized gains/losses on holdings in foreign dividend accruals when they settle and are exchanged into the portfolio's 'Base Currency'. Client facing teams do not want to see these values.
@@ -864,10 +972,11 @@ class LWAPX2SFTransactionEngine(TransactionProcessingEngine):
 
     def assign_cash_flow_local(self, txn: Transaction):
         # apx2sf.pl line 2857-2865
-        if txn.TransactionCode in ('by'):
-            txn.CashFlowLocal = -1.0 * txn.TradeAmountLocal
-        else:
-            txn.CashFlowLocal = txn.TradeAmountLocal
+        if trade_amount_local := getattr(txn, 'TradeAmountLocal', None):
+            if txn.TransactionCode in ('by'):
+                txn.CashFlowLocal = -1.0 * trade_amount_local
+            else:
+                txn.CashFlowLocal = trade_amount_local
 
     def assign_trade_amt_cash_flow_firm_ccy(self, txn: Transaction, portfolio2firm_fx_rate: float):
         # apx2sf.pl line 2916-2944: Assign TradeAmount & CashFlow in firm ccy

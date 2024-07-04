@@ -3,6 +3,7 @@ DataFrame utils not provided by Pandas
 """
 
 import datetime
+import logging
 
 import pandas as pd
 
@@ -146,6 +147,9 @@ def compare_dataframes(df1, df2, match_columns, exclude_columns, tolerances={}, 
         if len(filtered_df1) == 0:
             unmatched_rows_df2.append(row2)
     
+    if len(matching_rows_with_differences) or len(unmatched_rows_df1) or len(unmatched_rows_df2):
+        print(f'***** Diffs found *****')
+
     # Print results
     print(f"Matched rows with differences: {len(matching_rows_with_differences)}")
     for row1, row2, non_matching_columns in matching_rows_with_differences:
@@ -154,17 +158,22 @@ def compare_dataframes(df1, df2, match_columns, exclude_columns, tolerances={}, 
         # print("Table 2:")
         # print(row2)
         print(f"{row1.get('tran_code') or row1.get('tran_code__c')} {row1.get('local_tran_key') or row1.get('lw_tran_id__c')} Non-matching columns: {len(non_matching_columns)}")
+        logging.error(f"{row1.get('tran_code') or row1.get('tran_code__c')} {row1.get('local_tran_key') or row1.get('lw_tran_id__c')} Non-matching columns: {len(non_matching_columns)}")
         for col in non_matching_columns:
             print(f"{col}: {row1[col]} (Table 1) vs {row2[col]} (Table 2)")
         print("\n")
     
     print(f"Unmatched rows in Table 1: {len(unmatched_rows_df1)}")
+    logging.error(f"Unmatched rows in Table 1: {len(unmatched_rows_df1)}")
     for row1 in unmatched_rows_df1:
         print(f"{row1.get('tran_code') or row1.get('tran_code__c')} {row1.get('local_tran_key') or row1.get('lw_tran_id__c')}")
+        logging.error(f"{row1.get('tran_code') or row1.get('tran_code__c')} {row1.get('local_tran_key') or row1.get('lw_tran_id__c')}")
     
     print(f"Unmatched rows in Table 2: {len(unmatched_rows_df2)}")
+    logging.error(f"Unmatched rows in Table 2: {len(unmatched_rows_df2)}")
     for row2 in unmatched_rows_df2:
         print(f"{row2.get('tran_code') or row2.get('tran_code__c')} {row2.get('local_tran_key') or row2.get('lw_tran_id__c')}")
+        logging.error(f"{row2.get('tran_code') or row2.get('tran_code__c')} {row2.get('local_tran_key') or row2.get('lw_tran_id__c')}")
     
     print(f"Matched rows: {len(matched_rows)}")
     # for row1, row2 in matched_rows:

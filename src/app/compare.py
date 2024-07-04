@@ -12,6 +12,7 @@ sys.path.append(src_dir)
 
 # from application.engines import StraightThruTransactionProcessingEngine, LWTransactionSummaryEngine
 from domain.models import TransactionProcessingQueueItem
+from domain.python_tools import get_current_callable
 
 # native
 from application.engines import StraightThruTransactionProcessingEngine, LWTransactionSummaryEngine, LWAPX2SFTransactionEngine
@@ -53,12 +54,18 @@ from infrastructure.util.dataframe import compare_dataframes
 
 def main():
     parser = argparse.ArgumentParser(description='Compare old txn summary results vs new engine results')
+    parser.add_argument('--log_level', '-l', type=str.upper, choices=['DEBUG', 'INFO', 'WARN', 'ERROR', 'CRITICAL'], help='Log level')
     parser.add_argument('--from_date', '-fd', type=lambda d: datetime.datetime.strptime(d, '%Y-%m-%d').date())
     parser.add_argument('--to_date', '-td', type=lambda d: datetime.datetime.strptime(d, '%Y-%m-%d').date())
     parser.add_argument('--portfolio_code', '-pc', nargs='+', default=[])
-    parser.add_argument('--run', '-run', action='store_true', default=[])
+    parser.add_argument('--run', '-run', action='store_true', default=False)
+    parser.add_argument('--gen_apx_procs', '-gap', action='store_true', default=False)
     
     args = parser.parse_args()
+
+    base_dir = AppConfig().get("logging", "base_dir")
+    os.environ['APP_NAME'] = AppConfig().get("app_name", "apx2sftxn_compare")
+    setup_logging(base_dir=base_dir, log_level_override=args.log_level)
 
     # df1 = COREDBLWTxnSummaryTable().read(portfolio_code=args.portfolio_code, from_date=args.data_date)
     # if args.data_date == datetime.date(2024, 4, 8):
@@ -70,6 +77,7 @@ def main():
     match_columns = ['portfolio_code', 'trade_date', 'name4stmt', 'quantity']
     exclude_columns = ['record_id', 'scenario', 'data_handle', 'asofdate', 'asofuser', 'scenariodate', 'computer'
         , 'gendate', 'moddate', 'genuser', 'moduser'
+        , 'lw_lineage'
         , 'lw_id', 'trade_date_original', 'portfolio_id'  # cols DNE in old LW Txn Summary or APX2SFTXN
         , 'sf_statement_group'  # thinking this is not needed for inclusion in new APX2SFTxn
         , 'security_id1', 'security_id2', 'price_per_unit_local'  # existing LW Transaction Summary doesn't save these to DB
@@ -86,17 +94,21 @@ def main():
         # df1 = COREDBLWTxnSummaryTable().read(from_date=args.from_date, to_date=args.to_date)
         # df2 = APXRepDBLWTxnSummaryTable().read(scenario='BASE', data_handle='37020804B005458B874D74434DBCD0A0', from_date=args.from_date, to_date=args.to_date)
 
-        df1 = COREDBLWTxnSummaryTable().read(from_date=args.from_date, to_date=args.to_date)
-        df2 = APXRepDBLWTxnSummaryTable().read(scenario='BASE', data_handle='37020804B005458B874D74434DBCD0A0', from_date=args.from_date, to_date=args.to_date)
+        # df1 = COREDBLWTxnSummaryTable().read(from_date=args.from_date, to_date=args.to_date)
+        # df2 = APXRepDBLWTxnSummaryTable().read(scenario='BASE', data_handle='37020804B005458B874D74434DBCD0A0', from_date=args.from_date, to_date=args.to_date)
 
-        # Call the function to compare dataframes
-        compare_dataframes(df1, df2, match_columns, exclude_columns)
-
+        # # Call the function to compare dataframes
+        # compare_dataframes(df1, df2, match_columns, exclude_columns)
+        
+        # target_df = LWDBSFTransactionTable().read(portfolio_code=None, from_date=args.from_date, to_date=args.to_date
+        #                                         , data_handle='CJTEST_CR1504' # 'CJTEST20240620_v1'
+        #                                     )
+        target_df = LWDBSFTransactionTable().read(portfolio_code=None, from_date=args.from_date, to_date=args.to_date
+                                                # , data_handle='CJTEST_CR1504' # 'CJTEST20240620_v1'
+                                            )
+        args.portfolio_code = target_df['portfolio_code'].unique().tolist()
     
     if args.run:
-        # TODO_CLEANUP: remove below (testing rounding 5 up)
-        # from infrastructure.util.math import normal_round
-        # print(normal_round(1.3287794865, 9)) 
         engines = [
             StraightThruTransactionProcessingEngine(
                 source_queue_repo = None,
@@ -118,7 +130,7 @@ def main():
                 ],
                 target_queue_repos = [COREDBAPX2SFTxnQueueRepository()],
                 source_txn_repo = CoreDBTransactionActivityRepository(),
-                dividends_repo = APXDBDividendRepository(),
+                # dividends_repo = APXDBDividendRepository(),
                 preprocessing_supplementary_repos = [
                     APXDBvPortfolioInMemoryRepository(),
                     APXDBvPortfolioBaseInMemoryRepository(),
@@ -152,6 +164,54 @@ def main():
                 fx_rate_repo = APXDBvFXRateInMemoryRepository(),
             ),
         ]
+    elif args.gen_apx_procs:
+        portfolios_supplement = APXDBvPortfolioInMemoryRepository()
+        portfolios_supplement.relevant_columns.append('PortfolioCode')
+
+        source_txn_repo = APXDBRealizedGainLossRepository()
+        target_txn_repo = CoreDBRealizedGainLossTransactionRepository()
+
+        print(f'{datetime.datetime.now()}: Reading from {source_txn_repo.cn}...')
+        res_transactions = source_txn_repo.get(portfolio_code=args.portfolio_code[0], trade_date=(args.from_date, args.to_date))
+        
+        # Populate the portfolio_code, modified_by, trade_date, lineage
+        for txn in res_transactions:
+            portfolios_supplement.supplement(txn)
+            txn.portfolio_code = txn.PortfolioCode  # None  # TODO: need to populate this?  # queue_item.portfolio_code
+            txn.trade_date = txn.ThruDate
+            txn.modified_by = f"{os.environ.get('APP_NAME')}_gen_apx_procs"
+            txn.add_lineage(f"{str(source_txn_repo)}"
+                                , source_callable=get_current_callable())
+
+        # Save to target repo
+        print(f'{datetime.datetime.now()}: Saving {len(res_transactions)} to {target_txn_repo.cn}')
+        target_txn_repo.create(transactions=res_transactions)
+
+        print(f'{datetime.datetime.now()}: Saved {len(res_transactions)} to {target_txn_repo.cn}')
+
+        source_txn_repo = APXDBTransactionActivityRepository()
+        target_txn_repo = CoreDBTransactionActivityRepository()
+
+        print(f'{datetime.datetime.now()}: Reading from {source_txn_repo.cn}...')
+        res_transactions = source_txn_repo.get(portfolio_code=args.portfolio_code[0], trade_date=(args.from_date, args.to_date))
+        
+        # Populate the portfolio_code, modified_by, trade_date, lineage
+        for txn in res_transactions:
+            portfolios_supplement.supplement(txn)
+            txn.portfolio_code = txn.PortfolioCode  # TODO: need to populate this?  # queue_item.portfolio_code
+            txn.trade_date = txn.TradeDate
+            txn.modified_by = f"{os.environ.get('APP_NAME')}_gen_apx_procs"
+            txn.add_lineage(f"{str(source_txn_repo)}"
+                                , source_callable=get_current_callable())
+
+        # Save to target repo
+        print(f'{datetime.datetime.now()}: Saving {len(res_transactions)} to {target_txn_repo.cn}')
+        target_txn_repo.create(transactions=res_transactions)
+
+        print(f'{datetime.datetime.now()}: Saved {len(res_transactions)} to {target_txn_repo.cn}')
+
+        return
+
     else:
         engines = []
 
@@ -182,12 +242,14 @@ def main():
     
         match_columns = ['lw_tran_id__c']  # for testing APX2SFTxn
         df1 = COREDBSFTransactionTable().read(portfolio_code=pc, from_date=args.from_date, to_date=args.to_date)
-        df2 = LWDBSFTransactionTable().read(portfolio_code=pc, from_date=args.from_date, to_date=args.to_date, data_handle='CJTEST20240620_v1')
+        df2 = LWDBSFTransactionTable().read(portfolio_code=pc, from_date=args.from_date, to_date=args.to_date
+                                                , data_handle='CJTEST_CR1504' # 'CJTEST20240620_v1'
+                                            )
 
         print(f"\n\n\n{datetime.datetime.now()}: ===== {pc} =====\n")
 
         # Call the function to compare dataframes
-        compare_dataframes(df1, df2, match_columns, exclude_columns, tolerances, ignore_zeros_vs_none=False)
+        # compare_dataframes(df1, df2, match_columns, exclude_columns, tolerances, ignore_zeros_vs_none=False)
 
         print(f"\n{datetime.datetime.now()}: ==========\n\n")
 

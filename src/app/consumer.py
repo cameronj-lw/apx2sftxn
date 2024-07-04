@@ -88,13 +88,6 @@ def main():
                 # APXDBPastDividendRepository(),
             ],
             prev_bday_cost_repo = LWDBAPXAppraisalPrevBdayRepository(),
-            postprocessing_supplementary_repos = [
-                # TODO_LAYERS: should these logics just be part of the engine?
-                TransactionNameRepository(),
-                TransactionSectionAndStmtTranRepository(),
-                TransactionOtherPostSupplementRepository(),
-                TransactionCashflowRepository(),
-            ]
         ),
         LWAPX2SFTransactionEngine(
             source_queue_repo = COREDBAPX2SFTxnQueueRepository(),

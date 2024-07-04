@@ -3,8 +3,10 @@
 from dataclasses import dataclass, field
 import datetime
 from enum import Enum
+import inspect
+import os
 from types import SimpleNamespace
-from typing import Union
+from typing import Callable, Optional, Union
 
 
 class Transaction(SimpleNamespace):
@@ -25,6 +27,32 @@ class Transaction(SimpleNamespace):
             return f"{self.TransactionCode} of {self.Quantity} units of {self.SecurityID1} in {self.PortfolioID} on {self.TradeDate}"
         except Exception as e:
             return super().__str__()
+
+    def get_lineage_msg_prefix(self, source_callable: Optional[Callable]=None) -> str:
+        """ Get desired prefix to add context to lineage """
+        lineage_msg = None        
+        source_class_name = (source_callable.__self__.__class__.__name__ if inspect.ismethod(source_callable) else None)
+        source_callable_name = (source_callable.__name__ if source_callable else None)
+        app_name = os.environ.get('APP_NAME')
+        if app_name:
+            if source_callable_name:
+                if source_class_name:
+                    return f'{app_name}: {source_class_name}::{source_callable_name}: '
+                else:
+                    return f'{app_name}: {source_callable_name}: '
+            else:
+                return f'{app_name}: '
+        else:
+            return ''
+
+    def add_lineage(self, msg: str, source_callable: Optional[Callable]=None):
+        """ Append a new note on lineage """
+        prefix = self.get_lineage_msg_prefix(source_callable)
+
+        if not hasattr(self, 'lw_lineage'):
+            self.lw_lineage = f'{prefix}{msg}'
+        else:
+            self.lw_lineage += f';\n{prefix}{msg}'
         
 
 class TransactionComment(SimpleNamespace):

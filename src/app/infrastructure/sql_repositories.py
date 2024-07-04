@@ -121,7 +121,7 @@ class LWDBAPXAppraisalPrevBdayRepository(SupplementaryRepository):
         elif len(res_dicts):
             return res_dicts[0]
         else:
-            logging.info(f"Found 0 rows in {self.table.cn} for {prev_bday} {pk_column_values.get('PortfolioCode')} {pk_column_values.get('SecurityID')}!")
+            logging.debug(f"Found 0 rows in {self.table.cn} for {prev_bday} {pk_column_values.get('PortfolioCode')} {pk_column_values.get('SecurityID')}!")
             return {}
 
     def supplement(self, transaction: Transaction):
@@ -188,32 +188,146 @@ class APXDBRealizedGainLossRepository(TransactionRepository):
         raise NotImplementedError(f'Cannot create in {self.cn}!')
 
     def get(self, portfolio_code: Union[str,None]=None, trade_date: Union[datetime.date, Tuple[datetime.date, datetime.date], None]=None) -> List[Transaction]:
-        res_df = self.proc.read(Portfolios=portfolio_code, FromDate=trade_date, ToDate=trade_date)
+        # Infer from & to dates, based on trade_date type
+        if isinstance(trade_date, tuple):
+            from_date, to_date = trade_date
+        elif isinstance(trade_date, datetime.date):
+            from_date = to_date = trade_date
+        else:
+            from_date = to_date = None
+
+        # read source proc, convert to Transactions, return them
+        res_df = self.proc.read(Portfolios=portfolio_code, FromDate=from_date, ToDate=to_date)
         transactions = [Transaction(**d) for d in res_df.to_dict('records')]
         return transactions
 
     def __str__(self):
         return str(self.proc)
 
+# TODO_CLEANUP: remove once not used
+# class APXDBTransactionActivityRepository_OLD(TransactionRepository):
+#     proc = APXDBTransactionActivityProcAndFunc()
+    
+#     def create(self, transactions: Union[List[Transaction],Transaction]) -> int:
+#         raise NotImplementedError(f'Cannot create in {self.cn}!')
+
+#     def get(self, portfolio_code: Union[str,None]=None, trade_date: Union[datetime.date, Tuple[datetime.date, datetime.date], None]=None) -> List[Transaction]:
+#         # Infer from & to dates, based on trade_date type
+#         if isinstance(trade_date, tuple):
+#             from_date, to_date = trade_date
+#         elif isinstance(trade_date, datetime.date):
+#             from_date = to_date = trade_date
+#         else:
+#             from_date = to_date = None
+
+#         # read source proc, convert to Transactions, return them
+#         res_df = self.proc.read(Portfolios=portfolio_code, FromDate=from_date, ToDate=to_date)
+#         transactions = [Transaction(**d) for d in res_df.to_dict('records')]
+#         return transactions
+
+#     def __str__(self):
+#         return str(self.proc)
+
 
 class APXDBTransactionActivityRepository(TransactionRepository):
-    proc = APXDBTransactionActivityProcAndFunc()
+    txn_source = APXDBTransactionActivityProcAndFunc()  # COREDBAPXfTransactionActivityTable()  # APXDBTransactionActivityProcAndFunc()
+    realized_gains_source = COREDBAPXfRealizedGainLossTable()  # APXDBRealizedGainLossProcAndFunc()
     
     def create(self, transactions: Union[List[Transaction],Transaction]) -> int:
         raise NotImplementedError(f'Cannot create in {self.cn}!')
 
     def get(self, portfolio_code: Union[str,None]=None, trade_date: Union[datetime.date, Tuple[datetime.date, datetime.date], None]=None) -> List[Transaction]:
-        res_df = self.proc.read(Portfolios=portfolio_code, FromDate=trade_date, ToDate=trade_date)
+        # Infer from & to dates, based on trade_date type
+        if isinstance(trade_date, tuple):
+            from_date, to_date = trade_date
+            historical_from_date = from_date + datetime.timedelta(days=-70)
+        elif isinstance(trade_date, datetime.date):
+            from_date = to_date = trade_date
+            historical_from_date = from_date + datetime.timedelta(days=-70)
+        else:
+            return []  # TODO_EH: exception?
+
+        # Get source transactions, including historical
+        res_df = self.txn_source.read(Portfolios=portfolio_code, FromDate=historical_from_date, ToDate=to_date)
+        # res_df = self.txn_source.read(portfolio_code=portfolio_code, from_date=historical_from_date, to_date=to_date)
         transactions = [Transaction(**d) for d in res_df.to_dict('records')]
-        return transactions
+        
+        # Find dividends with SETTLE date within the specified trade_date range
+        dividends = [t for t in transactions 
+            if from_date <= t.SettleDate.date() <= to_date and t.TransactionCode == 'dv']
+
+        # Read realized gains proc once (avoids reading it for every dividend separately)
+        # realized_gains_df = self.realized_gains_source.read(Portfolios=portfolio_code, FromDate=historical_from_date, ToDate=to_date)
+        realized_gains_df = self.realized_gains_source.read(portfolio_code=portfolio_code, from_date=historical_from_date, to_date=to_date)
+
+        for dv in dividends:
+            # APXTxns.pm line 353: jam on the LW blinders:  dv are all about SettleDate
+            dv.TradeDate = dv.SettleDate
+
+            # APXTxns.pm line 453-464: Find a wd matching the settle date, security (i.e. divacc), and having very similar amount
+            wd_candidates = [t for t in transactions if t.TransactionCode in ('wd', 'dp')] 
+            wd_candidates = [t for t in wd_candidates if t.SettleDate == dv.SettleDate]
+            wd_candidates = [t for t in wd_candidates if t.SecurityID1 == dv.SecurityID2]
+            wd_candidates = [t for t in wd_candidates if abs(t.TradeAmountLocal - dv.TradeAmountLocal) < 0.015]  # APXTxns.pm line 11
+
+            if len(wd_candidates):
+                wd = wd_candidates[0]
+
+                # Remove this one from the transactions, since it has been "merged" into the dividend
+                transactions = [t for t in transactions if t != wd]
+
+            # APXTxns.pm line 465-519: Find a sl from cash to cash, and having very similar amount
+            sl_candidates = [t for t in transactions if t.TransactionCode == 'sl']
+            sl_candidates = [t for t in sl_candidates if t.SettleDate == dv.SettleDate]
+            sl_candidates = [t for t in sl_candidates if t.SecTypeCode1 == 'ca']
+            sl_candidates = [t for t in sl_candidates if t.SecTypeCode2 == 'ca']
+            sl_candidates = [t for t in sl_candidates if abs(t.TradeAmountLocal - dv.TradeAmountLocal) < 0.015]  # APXTxns.pm line 11
+
+            if len(sl_candidates):
+                sl = sl_candidates[0]
+
+                # Remove this one from the transactions, since it has been "merged" into the dividend
+                transactions = [t for t in transactions if t != sl]
+
+                # update the 'dv' txn row to consolidate in the FX (line 468-476)
+                for attr in ['SecurityID2', 'TradeAmount', 'TradeDateFX', 'SettleDateFX', 'SpotRate', 'FXDenominatorCurrencyCode', 'FXNumeratorCurrencyCode', 'SecTypeCode2', 'FxRate']:
+                    if hasattr(sl, attr):
+                        sl_value = getattr(sl, attr)
+                        setattr(dv, attr, sl_value)
+                    # TODO_EH: possible that the attribute DNE?
+
+                # line 484-518: combine the gains 
+                # Need to find realized gains first:                
+                realized_gains_transactions = [Transaction(**d) for d in realized_gains_df.to_dict('records') if d['PortfolioTransactionID'] == sl.PortfolioTransactionID]
+                if len(realized_gains_transactions):
+                    # If we reached here, there is a relevant "realized gain" to combine with:
+                    realized_gains_transaction = realized_gains_transactions[0]
+                    if hasattr(dv, 'RealizedGainLoss'):
+                        if dv.RealizedGainLoss is not None:
+                            dv.RealizedGainLoss += realized_gains_transaction.RealizedGainLoss
+                        else:
+                            dv.RealizedGainLoss = realized_gains_transaction.RealizedGainLoss
+                    else:
+                        dv.RealizedGainLoss = realized_gains_transaction.RealizedGainLoss
+
+        # Finally, we have:
+        # transactions: excludes any sl/wd which have been "merged" into dividends above.
+        # Note this still includes historical, hence the need to filter based on TradeDate below
+        # dividends: updated above based on any identified sl/wd to "merge" in
+        # Combine these two, then return the combined result
+        res_transactions = [t for t in transactions
+            if from_date <= t.TradeDate.date() <= to_date and t.TransactionCode != 'dv']
+        res_transactions.extend(dividends)
+        return res_transactions
 
     def __str__(self):
-        return str(self.proc)
+        return str(self.txn_source)
 
 
 class APXDBDividendRepository(TransactionRepository):
-    txn_proc = APXDBTransactionActivityProcAndFunc()
-    realized_gains_proc = APXDBRealizedGainLossProcAndFunc()
+    # TODO_CLEANUP: remove once not used (APXDBTransactionActivityRepository shall provide dividends instead)
+    txn_source = APXDBTransactionActivityProcAndFunc()
+    realized_gains_source = APXDBRealizedGainLossProcAndFunc()
     
     def create(self, transactions: Union[List[Transaction],Transaction]) -> int:
         raise NotImplementedError(f'Cannot create in {self.cn}!')
@@ -227,7 +341,7 @@ class APXDBDividendRepository(TransactionRepository):
             logging.error(f'Unexpected type for trade_date: {type(trade_date)}')
             return  # TODO_EH: exception?
         
-        res_df = self.txn_proc.read(Portfolios=portfolio_code, FromDate=from_date, ToDate=trade_date)
+        res_df = self.txn_source.read(Portfolios=portfolio_code, FromDate=from_date, ToDate=trade_date)
         transactions = [Transaction(**d) for d in res_df.to_dict('records')]
 
         # Find dividends with SETTLE date with the specified trade_date
@@ -237,9 +351,13 @@ class APXDBDividendRepository(TransactionRepository):
             return []
 
         # Read realized gains proc once (avoids reading it for every dividend separately)
-        realized_gains_df = self.realized_gains_proc.read(Portfolios=portfolio_code, FromDate=trade_date, ToDate=trade_date)
+        realized_gains_df = self.realized_gains_source.read(Portfolios=portfolio_code, FromDate=trade_date, ToDate=trade_date)
 
         for dv in dividends:
+            # Start with empty array for transactions "merged" into this dividend.
+            # If we find sl and/or wd, we'll add them here.
+            dv.transactions_merged_in = []
+
             # APXTxns.pm line 353: jam on the LW blinders:  dv are all about SettleDate
             dv.TradeDate = dv.SettleDate
 
@@ -248,6 +366,12 @@ class APXDBDividendRepository(TransactionRepository):
             wd_candidates = [t for t in wd_candidates if t.SettleDate == dv.SettleDate]
             wd_candidates = [t for t in wd_candidates if t.SecurityID1 == dv.SecurityID2]
             wd_candidates = [t for t in wd_candidates if abs(t.TradeAmountLocal - dv.TradeAmountLocal) < 0.015]  # APXTxns.pm line 11
+
+            if len(wd_candidates):
+                wd = wd_candidates[0]
+
+                # Record this as having been "merged" into the dividend
+                dv.transactions_merged_in.append(wd)
 
             # APXTxns.pm line 465-519: Find a sl from cash to cash, and having very similar amount
             sl_candidates = [t for t in transactions if t.TransactionCode == 'sl']
@@ -258,6 +382,9 @@ class APXDBDividendRepository(TransactionRepository):
 
             if len(sl_candidates):
                 sl = sl_candidates[0]
+
+                # Record this as having been "merged" into the dividend
+                dv.transactions_merged_in.append(sl)
 
                 # update the 'dv' txn row to consolidate in the FX (line 468-476)
                 for attr in ['SecurityID2', 'TradeAmount', 'TradeDateFX', 'SettleDateFX', 'SpotRate', 'FXDenominatorCurrencyCode', 'FXNumeratorCurrencyCode', 'SecTypeCode2', 'FxRate']:
@@ -284,7 +411,7 @@ class APXDBDividendRepository(TransactionRepository):
         return dividends
 
     def __str__(self):
-        return str(self.proc)
+        return str(self.txn_source)
 
 
 class APXDBPastDividendRepository_OLD(SupplementaryRepository):
@@ -359,6 +486,7 @@ class APXRepDBLWTxnSummaryRepository(TransactionRepository):
     table = APXRepDBLWTxnSummaryTable()
     txn2table_columns = [
         # ({transaction attribute}, {table column})
+        ('lw_lineage'       , 'lw_lineage'),
         ('PortfolioCode'    , 'portfolio_code'),
         ('PortfolioName'    , 'portfolio_name'),
         ('TransactionCode'  , 'tran_code'),
@@ -512,7 +640,7 @@ class CoreDBRealizedGainLossSupplementaryRepository(SupplementaryRepository):
         elif len(res_dicts):
             return res_dicts[0]
         else:
-            logging.info(f"Found 0 rows in {self.table.cn} for {pk_column_values}!")
+            logging.debug(f"Found 0 rows in {self.table.cn} for {pk_column_values}!")
             return {}
 
     def supplement(self, transaction: Transaction):
@@ -734,6 +862,7 @@ class COREDBLWTxnSummaryRepository(TransactionRepository):
         # ({transaction attribute}, {table column}, {txn2table_format_function}, {table2txn_format_function})
         # In cases where the same txn attribute maps to multiple table columns, the more desirable column should be listed first (higher)
         # In cases where the same table column maps to multiple txn attributes, the more desirable attribute should be listed first (higher)
+        Txn2TableColMap('lw_lineage'       , 'lw_lineage'),
         Txn2TableColMap('PortfolioCode'    , 'portfolio_code'),
         Txn2TableColMap('PortfolioName'    , 'portfolio_name'),
         Txn2TableColMap('TransactionCode'  , 'tran_code'),
@@ -914,6 +1043,7 @@ class COREDBSFTransactionRepository(TransactionRepository):
         # ({transaction attribute}, {table column}, {txn2table_format_function}, {table2txn_format_function})
         # In cases where the same txn attribute maps to multiple table columns, the more desirable column should be listed first (higher)
         # In cases where the same table column maps to multiple txn attributes, the more desirable attribute should be listed first (higher)
+        Txn2TableColMap('lw_lineage'       , 'lw_lineage'),
         Txn2TableColMap('TradeDate'        , 'data_dt'),
         Txn2TableColMap('PortfolioCode'    , 'portfolio_code'),
         Txn2TableColMap('ProprietarySymbol1', 'security_id__c'
