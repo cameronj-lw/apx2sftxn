@@ -13,6 +13,7 @@ from sqlalchemy import sql
 
 # native
 from domain.models import Heartbeat, Transaction, TransactionProcessingQueueItem, QueueStatus, PKColumnMapping
+from domain.python_tools import get_current_callable
 from domain.repositories import HeartbeatRepository, TransactionRepository, TransactionProcessingQueueRepository, SupplementaryRepository
 # from infrastructure.in_memory_repositories import CoreDBRealizedGainLossInMemoryRepository
 from infrastructure.models import MGMTDBHeartbeat, Txn2TableColMap
@@ -236,6 +237,23 @@ class APXDBTransactionActivityRepository(TransactionRepository):
     def create(self, transactions: Union[List[Transaction],Transaction]) -> int:
         raise NotImplementedError(f'Cannot create in {self.cn}!')
 
+    def get_raw(self, portfolio_code: Union[str,None]=None, trade_date: Union[datetime.date, Tuple[datetime.date, datetime.date], None]=None) -> List[Transaction]:
+        # Infer from & to dates, based on trade_date type
+        if isinstance(trade_date, tuple):
+            from_date, to_date = trade_date
+            historical_from_date = from_date + datetime.timedelta(days=-70)
+        elif isinstance(trade_date, datetime.date):
+            from_date = to_date = trade_date
+            historical_from_date = from_date + datetime.timedelta(days=-70)
+        else:
+            return []  # TODO_EH: exception?
+
+        # Get source transactions, including historical
+        res_df = self.txn_source.read(Portfolios=portfolio_code, FromDate=historical_from_date, ToDate=to_date)
+        # res_df = self.txn_source.read(portfolio_code=portfolio_code, from_date=historical_from_date, to_date=to_date)
+        transactions = [Transaction(**d) for d in res_df.to_dict('records')]
+        return transactions
+        
     def get(self, portfolio_code: Union[str,None]=None, trade_date: Union[datetime.date, Tuple[datetime.date, datetime.date], None]=None) -> List[Transaction]:
         # Infer from & to dates, based on trade_date type
         if isinstance(trade_date, tuple):
@@ -274,7 +292,8 @@ class APXDBTransactionActivityRepository(TransactionRepository):
                 wd = wd_candidates[0]
 
                 # Remove this one from the transactions, since it has been "merged" into the dividend
-                transactions = [t for t in transactions if t != wd]
+                # transactions = [t for t in transactions if t != wd]
+                dv.add_lineage(f'{dv.TransactionCode} -> Merged dp/wd {wd.PortfolioTransactionID}... but did not remove the wd... see APXTxns.pm line 462', source_callable=get_current_callable())
 
             # APXTxns.pm line 465-519: Find a sl from cash to cash, and having very similar amount
             sl_candidates = [t for t in transactions if t.TransactionCode == 'sl']
@@ -288,6 +307,7 @@ class APXDBTransactionActivityRepository(TransactionRepository):
 
                 # Remove this one from the transactions, since it has been "merged" into the dividend
                 transactions = [t for t in transactions if t != sl]
+                dv.add_lineage(f'{dv.TransactionCode} -> Merged sl {sl.PortfolioTransactionID}', source_callable=get_current_callable())
 
                 # update the 'dv' txn row to consolidate in the FX (line 468-476)
                 for attr in ['SecurityID2', 'TradeAmount', 'TradeDateFX', 'SettleDateFX', 'SpotRate', 'FXDenominatorCurrencyCode', 'FXNumeratorCurrencyCode', 'SecTypeCode2', 'FxRate']:
@@ -679,37 +699,40 @@ class CoreDBRealizedGainLossTransactionRepository(TransactionRepository):
         now = datetime.datetime.now()
         delete_stmts = []
         refresh_criterias = []
+        old_row_count = self.table.row_count()
+        logging.debug(f'{self.cn} got row count {old_row_count}')
         for txn in transactions:
             # Supplement transactions
             txn.modified_by = os.environ.get('APP_NAME') if not hasattr(txn, 'modified_by') else txn.modified_by
             txn.modified_at = now
 
             # Also create & append delete stmt, if it's not already there:
-            delete_stmt = sql.delete(self.table.table_def)
-            refresh_criteria = {}
-            if hasattr(txn, 'portfolio_code'):
-                delete_stmt = delete_stmt.where(self.table.c.portfolio_code == txn.portfolio_code)
-                refresh_criteria['portfolio_code'] = txn.portfolio_code
-            if hasattr(txn, 'PortfolioCode'):
-                delete_stmt = delete_stmt.where(self.table.c.portfolio_code == txn.PortfolioCode)
-                refresh_criteria['portfolio_code'] = txn.PortfolioCode
-            if hasattr(txn, 'PortfolioBaseCode'):
-                delete_stmt = delete_stmt.where(self.table.c.portfolio_code == txn.PortfolioBaseCode)
-                refresh_criteria['portfolio_code'] = txn.PortfolioBaseCode            
-            if hasattr(txn, 'CloseDate'):
-                delete_stmt = delete_stmt.where(self.table.c.CloseDate == txn.CloseDate)
-                refresh_criteria['from_date'] = txn.CloseDate
-            elif hasattr(txn, 'trade_date'):
-                delete_stmt = delete_stmt.where(self.table.c.CloseDate == txn.trade_date)
-                refresh_criteria['from_date'] = txn.trade_date
-            else:
-                logging.error(f'Txn has no trade date!? {txn}')
-                # TODO_EH: raise exception?
+            if old_row_count:
+                delete_stmt = sql.delete(self.table.table_def)
+                refresh_criteria = {}
+                if hasattr(txn, 'portfolio_code'):
+                    delete_stmt = delete_stmt.where(self.table.c.portfolio_code == txn.portfolio_code)
+                    # refresh_criteria['portfolio_code'] = txn.portfolio_code
+                if hasattr(txn, 'PortfolioCode'):
+                    delete_stmt = delete_stmt.where(self.table.c.portfolio_code == txn.PortfolioCode)
+                    # refresh_criteria['portfolio_code'] = txn.PortfolioCode
+                if hasattr(txn, 'PortfolioBaseCode'):
+                    delete_stmt = delete_stmt.where(self.table.c.portfolio_code == txn.PortfolioBaseCode)
+                    # refresh_criteria['portfolio_code'] = txn.PortfolioBaseCode            
+                if hasattr(txn, 'CloseDate'):
+                    delete_stmt = delete_stmt.where(self.table.c.CloseDate == txn.CloseDate)
+                    # refresh_criteria['from_date'] = txn.CloseDate
+                elif hasattr(txn, 'trade_date'):
+                    delete_stmt = delete_stmt.where(self.table.c.CloseDate == txn.trade_date)
+                    # refresh_criteria['from_date'] = txn.trade_date
+                else:
+                    logging.error(f'Txn has no trade date!? {txn}')
+                    # TODO_EH: raise exception?
             
-            if delete_stmt not in delete_stmts:
-                delete_stmts.append(delete_stmt)
-            if refresh_criteria not in refresh_criterias:
-                refresh_criterias.append(refresh_criteria)
+                if delete_stmt not in delete_stmts:
+                    delete_stmts.append(delete_stmt)
+                if refresh_criteria not in refresh_criterias:
+                    refresh_criterias.append(refresh_criteria)
 
         # Convert list of SimpleNamespace instances to list of dictionaries
         data = [{k: getattr(txn, k) for k in txn.__dict__} for txn in transactions]
@@ -718,9 +741,13 @@ class CoreDBRealizedGainLossTransactionRepository(TransactionRepository):
         df = pd.DataFrame(data)
 
         # Delete old results
-        for stmt in delete_stmts:
-            logging.debug(f'Deleting old results from {self.table.cn}... {str(stmt)}')
-            delete_res = self.table.execute_write(stmt)
+        if old_row_count:
+            logging.info(f'Deleting old results from {self.table.cn}...')
+            for stmt in delete_stmts:
+                logging.debug(f'Deleting old results from {self.table.cn}... {str(stmt)}')
+                delete_res = self.table.execute_write(stmt)
+        else:
+            logging.info(f'Skipping delete in {self.cn} because there are 0 existing rows!')
 
         # Bulk insert df
         logging.info(f'Inserting new results to {self.table.cn}...')
@@ -736,18 +763,178 @@ class CoreDBRealizedGainLossTransactionRepository(TransactionRepository):
         return res.rowcount
 
     def get(self, portfolio_code: Union[str,None]=None, trade_date: Union[datetime.date, Tuple[datetime.date, datetime.date], None]=None) -> List[Transaction]:
+        # Infer from date & to date from trade_date
         if isinstance(trade_date, tuple):
             from_date, to_date = trade_date
         elif isinstance(trade_date, datetime.date):
             from_date = to_date = trade_date
         elif trade_date:
-            logging.error(f'Invalid arg for {self.cn} GET: {trade_date}')
+            logging.error(f'{type(trade_date).__name__}: invalid arg for {self.cn} GET trade_date: {trade_date}')
+        else:
+            from_date = to_date = None
+        
         res_df = self.table.read(portfolio_code=portfolio_code, from_date=from_date, to_date=to_date)
         res_transactions = [Transaction(**r) for r in res_df.to_dict('records')]
         return res_transactions
 
 
 class CoreDBTransactionActivityRepository(TransactionRepository):
+    txn_source = COREDBAPXfTransactionActivityTable()
+    realized_gains_source = COREDBAPXfRealizedGainLossTable()
+    
+    def create(self, transactions: Union[List[Transaction],Transaction]) -> int:
+        # May be a Transaction. If so, make it a list:
+        if isinstance(transactions, Transaction):
+            transactions = [transactions]
+
+        now = datetime.datetime.now()
+        delete_stmts = []
+        old_row_count = self.txn_source.row_count()
+        logging.debug(f'{self.cn} got row count {old_row_count}')
+        for txn in transactions:
+            # Supplement transactions
+            txn.modified_by = os.environ.get('APP_NAME') if not hasattr(txn, 'modified_by') else txn.modified_by
+            txn.modified_at = now
+
+            # Also create & append delete stmt, if it's not already there:
+            if old_row_count:
+                delete_stmt = sql.delete(self.txn_source.table_def)
+                if hasattr(txn, 'portfolio_code'):
+                    delete_stmt = delete_stmt.where(self.txn_source.c.portfolio_code == txn.portfolio_code)
+                if hasattr(txn, 'PortfolioCode'):
+                    delete_stmt = delete_stmt.where(self.txn_source.c.portfolio_code == txn.PortfolioCode)
+                if hasattr(txn, 'PortfolioBaseCode'):
+                    delete_stmt = delete_stmt.where(self.txn_source.c.portfolio_code == txn.PortfolioBaseCode)
+                if hasattr(txn, 'CloseDate'):
+                    delete_stmt = delete_stmt.where(self.txn_source.c.CloseDate == txn.CloseDate)
+                elif hasattr(txn, 'trade_date'):
+                    delete_stmt = delete_stmt.where(self.txn_source.c.CloseDate == txn.trade_date)
+                else:
+                    logging.error(f'Txn has no trade date!? {txn}')
+                    # TODO_EH: raise exception?
+            
+                if delete_stmt not in delete_stmts:
+                    delete_stmts.append(delete_stmt)
+
+        # Convert list of SimpleNamespace instances to list of dictionaries
+        data = [{k: getattr(txn, k) for k in txn.__dict__} for txn in transactions]
+
+        # Create DataFrame from list of dictionaries
+        df = pd.DataFrame(data)
+
+        # Delete old results
+        if old_row_count:
+            logging.info(f'Deleting old results from {self.txn_source.cn}...')
+            for stmt in delete_stmts:
+                logging.debug(f'Deleting old results from {self.txn_source.cn}... {str(stmt)}')
+                delete_res = self.txn_source.execute_write(stmt)
+        else:
+            logging.info(f'Skipping delete in {self.cn} because there are 0 existing rows!')
+
+        # Bulk insert df
+        logging.info(f'Inserting new results to {self.txn_source.cn}...')
+        res = self.txn_source.bulk_insert(df)
+
+        # Reutrn row count
+        return res.rowcount
+
+    def get(self, portfolio_code: Union[str,None]=None, trade_date: Union[datetime.date, Tuple[datetime.date, datetime.date], None]=None) -> List[Transaction]:
+        # Infer from & to dates, based on trade_date type
+        if isinstance(trade_date, tuple):
+            from_date, to_date = trade_date
+            historical_from_date = from_date + datetime.timedelta(days=-70)
+        elif isinstance(trade_date, datetime.date):
+            from_date = to_date = trade_date
+            historical_from_date = from_date + datetime.timedelta(days=-70)
+        else:
+            return []  # TODO_EH: exception?
+
+        # Get source transactions, including historical
+        res_df = self.txn_source.read(portfolio_code=portfolio_code, from_date=historical_from_date, to_date=to_date)
+        transactions = [Transaction(**d) for d in res_df.to_dict('records')]
+        
+        # Find dividends with SETTLE date within the specified trade_date range
+        dividends = [t for t in transactions 
+            # if from_date <= t.SettleDate.date() <= to_date and t.TransactionCode == 'dv']
+            if from_date <= t.SettleDate <= to_date and t.TransactionCode == 'dv']
+
+        # Read realized gains proc once (avoids reading it for every dividend separately)
+        realized_gains_df = self.realized_gains_source.read(portfolio_code=portfolio_code, from_date=historical_from_date, to_date=to_date)
+
+        for dv in dividends:
+            # APXTxns.pm line 353: jam on the LW blinders:  dv are all about SettleDate
+            dv.TradeDate = dv.SettleDate
+
+            # APXTxns.pm line 453-464: Find a wd matching the settle date, security (i.e. divacc), and having very similar amount
+            wd_candidates = [t for t in transactions if t.TransactionCode in ('wd', 'dp')] 
+            wd_candidates = [t for t in wd_candidates if t.SettleDate == dv.SettleDate]
+            wd_candidates = [t for t in wd_candidates if t.SecurityID1 == dv.SecurityID2]
+            wd_candidates = [t for t in wd_candidates if abs(t.TradeAmountLocal - dv.TradeAmountLocal) < 0.015]  # APXTxns.pm line 11
+
+            if len(wd_candidates):
+                wd = wd_candidates[0]
+
+                # Remove this one from the transactions, since it has been "merged" into the dividend
+                # transactions = [t for t in transactions if t != wd]
+                dv.add_lineage(f'{dv.TransactionCode} -> Merged dp/wd {wd.PortfolioTransactionID}... but did not remove the wd... see APXTxns.pm line 462', source_callable=get_current_callable())
+
+            # APXTxns.pm line 465-519: Find a sl from cash to cash, and having very similar amount
+            sl_candidates = [t for t in transactions if t.TransactionCode == 'sl']
+            sl_candidates = [t for t in sl_candidates if t.SettleDate == dv.SettleDate]
+            sl_candidates = [t for t in sl_candidates if t.SecTypeCode1 == 'ca']
+            sl_candidates = [t for t in sl_candidates if t.SecTypeCode2 == 'ca']
+            sl_candidates = [t for t in sl_candidates if abs(t.TradeAmountLocal - dv.TradeAmountLocal) < 0.015]  # APXTxns.pm line 11
+
+            if len(sl_candidates):
+                sl = sl_candidates[0]
+
+                # Remove this one from the transactions, since it has been "merged" into the dividend
+                transactions = [t for t in transactions if t != sl]
+                dv.add_lineage(f'{dv.TransactionCode} -> Merged sl {sl.PortfolioTransactionID}', source_callable=get_current_callable())
+
+                # update the 'dv' txn row to consolidate in the FX (line 468-476)
+                for attr in ['SecurityID2', 'TradeAmount', 'TradeDateFX', 'SettleDateFX', 'SpotRate', 'FXDenominatorCurrencyCode', 'FXNumeratorCurrencyCode', 'SecTypeCode2', 'FxRate']:
+                    if hasattr(sl, attr):
+                        sl_value = getattr(sl, attr)
+                        setattr(dv, attr, sl_value)
+                    # TODO_EH: possible that the attribute DNE?
+
+                # line 484-518: combine the gains 
+                # Need to find realized gains first:                
+                realized_gains_transactions = [Transaction(**d) for d in realized_gains_df.to_dict('records') if d['PortfolioTransactionID'] == sl.PortfolioTransactionID]
+                if len(realized_gains_transactions):
+                    # If we reached here, there is a relevant "realized gain" to combine with:
+                    realized_gains_transaction = realized_gains_transactions[0]
+                    if hasattr(dv, 'RealizedGainLoss'):
+                        if dv.RealizedGainLoss is not None:
+                            dv.RealizedGainLoss += realized_gains_transaction.RealizedGainLoss
+                        else:
+                            dv.RealizedGainLoss = realized_gains_transaction.RealizedGainLoss
+                    else:
+                        dv.RealizedGainLoss = realized_gains_transaction.RealizedGainLoss
+
+        # Finally, we have:
+        # transactions: excludes any sl/wd which have been "merged" into dividends above.
+        # Note this still includes historical, hence the need to filter based on TradeDate below
+        # dividends: updated above based on any identified sl/wd to "merge" in
+        # Combine these two, then return the combined result
+        res_transactions = [t for t in transactions
+            if from_date <= t.TradeDate <= to_date and t.TransactionCode != 'dv']
+        res_transactions.extend(dividends)
+
+        # Order by PortfolioTransactionID and return
+        # Doing this ordering should ensure consistency with Perl code in ordering for the for loops.
+        # This is relevant when grouping dp/wd's and assigning the group a LocalTranKey of the first dp/wd,
+        # for example. See application\engines.py::net_deposits_withdrawals.
+        sorted_transactions = sorted(res_transactions, key=lambda x: x.PortfolioTransactionID)
+        return sorted_transactions
+
+    def __str__(self):
+        return str(self.txn_source)
+
+
+class CoreDBTransactionActivityRepository_OLD(TransactionRepository):
+    # TODO_CLEANUP: remove once confirmed the new CoreDBTransactionActivityRepository works
     table = COREDBAPXfTransactionActivityTable()
 
     def create(self, transactions: Union[List[Transaction],Transaction]) -> int:

@@ -270,8 +270,9 @@ class CoreDBSFPortfolioLatestInMemoryRepository(InMemorySingletonSQLRepository):
     def supplement(self, transaction: Transaction):
         # Also assign the SF Portfolio ID
         supplemental_data = super().supplement(transaction)
-        if sf_portfolio_id := supplemental_data.get('Id'):
-            transaction.SfPortfolioID = sf_portfolio_id
+        if supplemental_data:
+            if sf_portfolio_id := supplemental_data.get('Id'):
+                transaction.SfPortfolioID = sf_portfolio_id
 
 
 class CoreDBRealizedGainLossInMemoryRepository(InMemorySingletonSQLRepository):

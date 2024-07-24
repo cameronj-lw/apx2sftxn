@@ -1,6 +1,7 @@
 
 import argparse
 import datetime
+import logging
 import os
 import sys
 
@@ -58,14 +59,18 @@ def main():
     parser.add_argument('--from_date', '-fd', type=lambda d: datetime.datetime.strptime(d, '%Y-%m-%d').date())
     parser.add_argument('--to_date', '-td', type=lambda d: datetime.datetime.strptime(d, '%Y-%m-%d').date())
     parser.add_argument('--portfolio_code', '-pc', nargs='+', default=[])
+    parser.add_argument('--gen_apx_realized_gain_loss', '-gargl', action='store_true', default=False)
+    parser.add_argument('--gen_apx_txn_activity', '-gata', action='store_true', default=False)
     parser.add_argument('--run', '-run', action='store_true', default=False)
-    parser.add_argument('--gen_apx_procs', '-gap', action='store_true', default=False)
+    parser.add_argument('--compare', '-diff', action='store_true', default=False)
+    parser.add_argument('--no_log', '-nl', action='store_true', default=False)
     
     args = parser.parse_args()
 
     base_dir = AppConfig().get("logging", "base_dir")
     os.environ['APP_NAME'] = AppConfig().get("app_name", "apx2sftxn_compare")
-    setup_logging(base_dir=base_dir, log_level_override=args.log_level)
+    if not args.no_log:
+        setup_logging(base_dir=base_dir, log_level_override=args.log_level)
 
     # df1 = COREDBLWTxnSummaryTable().read(portfolio_code=args.portfolio_code, from_date=args.data_date)
     # if args.data_date == datetime.date(2024, 4, 8):
@@ -81,6 +86,7 @@ def main():
         , 'lw_id', 'trade_date_original', 'portfolio_id'  # cols DNE in old LW Txn Summary or APX2SFTXN
         , 'sf_statement_group'  # thinking this is not needed for inclusion in new APX2SFTxn
         , 'security_id1', 'security_id2', 'price_per_unit_local'  # existing LW Transaction Summary doesn't save these to DB
+        # , 'Portfolio__c'  # with MC running in test, there may be an incomplete SF dataset in most recent snap
     ]
     tolerances = {
         'fx_rate': 0.000051,  # Perl is inconsistent in number of rounding places (sometimes 4, sometimes 9? Not sure)
@@ -110,18 +116,18 @@ def main():
     
     if args.run:
         engines = [
-            StraightThruTransactionProcessingEngine(
-                source_queue_repo = None,
-                target_txn_repos = [CoreDBRealizedGainLossTransactionRepository()],
-                target_queue_repos = [],
-                source_txn_repo = APXDBRealizedGainLossRepository(),
-            ),
-            StraightThruTransactionProcessingEngine(
-                source_queue_repo = None,
-                target_txn_repos = [CoreDBTransactionActivityRepository()],
-                target_queue_repos = [],
-                source_txn_repo = APXDBTransactionActivityRepository(),
-            ),
+            # StraightThruTransactionProcessingEngine(
+            #     source_queue_repo = None,
+            #     target_txn_repos = [CoreDBRealizedGainLossTransactionRepository()],
+            #     target_queue_repos = [],
+            #     source_txn_repo = APXDBRealizedGainLossRepository(),
+            # ),
+            # StraightThruTransactionProcessingEngine(
+            #     source_queue_repo = None,
+            #     target_txn_repos = [CoreDBTransactionActivityRepository()],
+            #     target_queue_repos = [],
+            #     source_txn_repo = APXDBTransactionActivityRepository(),
+            # ),
             LWTransactionSummaryEngine(
                 source_queue_repo = CoreDBLWTransactionSummaryQueueRepository(),
                 target_txn_repos = [
@@ -164,7 +170,7 @@ def main():
                 fx_rate_repo = APXDBvFXRateInMemoryRepository(),
             ),
         ]
-    elif args.gen_apx_procs:
+    if args.gen_apx_realized_gain_loss:
         portfolios_supplement = APXDBvPortfolioInMemoryRepository()
         portfolios_supplement.relevant_columns.append('PortfolioCode')
 
@@ -178,7 +184,7 @@ def main():
         for txn in res_transactions:
             portfolios_supplement.supplement(txn)
             txn.portfolio_code = txn.PortfolioCode  # None  # TODO: need to populate this?  # queue_item.portfolio_code
-            txn.trade_date = txn.ThruDate
+            txn.trade_date = txn.CloseDate
             txn.modified_by = f"{os.environ.get('APP_NAME')}_gen_apx_procs"
             txn.add_lineage(f"{str(source_txn_repo)}"
                                 , source_callable=get_current_callable())
@@ -189,6 +195,7 @@ def main():
 
         print(f'{datetime.datetime.now()}: Saved {len(res_transactions)} to {target_txn_repo.cn}')
 
+    if args.gen_apx_txn_activity:
         source_txn_repo = APXDBTransactionActivityRepository()
         target_txn_repo = CoreDBTransactionActivityRepository()
 
@@ -210,25 +217,23 @@ def main():
 
         print(f'{datetime.datetime.now()}: Saved {len(res_transactions)} to {target_txn_repo.cn}')
 
-        return
-
-    else:
-        engines = []
+    # else:
+    #     engines = []
 
     for pc in args.portfolio_code:
         result = None
         for engine in engines:
-            print(f'{datetime.datetime.now()}: Processing {pc} for {engine}...')
+            logging.info(f'{datetime.datetime.now()}: Processing {pc} for {engine}...')
             if not result:
                 result = engine.process(queue_item=TransactionProcessingQueueItem(portfolio_code=pc, trade_date=args.from_date))
             else:
                 result = engine.process(queue_item=TransactionProcessingQueueItem(portfolio_code=pc, trade_date=args.from_date)
                                             # , starting_transactions=result
                                         )
-            print(f'{datetime.datetime.now()}: Got {len(result)} transaction from {engine}...')
+            logging.info(f'{datetime.datetime.now()}: Got {len(result)} transaction from {engine}...')
             # Now we have the results. Save them:
             for repo in engine.target_txn_repos:
-                print(f'{datetime.datetime.now()}: Creating transactions in {repo.cn}...')
+                logging.info(f'{datetime.datetime.now()}: Creating transactions in {repo.cn}...')
                 create_res = repo.create(transactions=result)
 
         match_columns = ['local_tran_key']  # for testing LW txn summary
@@ -246,12 +251,12 @@ def main():
                                                 , data_handle='CJTEST_CR1504' # 'CJTEST20240620_v1'
                                             )
 
-        print(f"\n\n\n{datetime.datetime.now()}: ===== {pc} =====\n")
+        logging.info(f"\n\n\n{datetime.datetime.now()}: ===== {pc} =====\n")
 
         # Call the function to compare dataframes
-        # compare_dataframes(df1, df2, match_columns, exclude_columns, tolerances, ignore_zeros_vs_none=False)
+        compare_dataframes(df1, df2, match_columns, exclude_columns, tolerances, ignore_zeros_vs_none=False)
 
-        print(f"\n{datetime.datetime.now()}: ==========\n\n")
+        logging.info(f"\n{datetime.datetime.now()}: ==========\n\n")
 
 if __name__ == "__main__":
     main()

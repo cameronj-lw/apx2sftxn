@@ -9,7 +9,7 @@ from typing import Dict, Union, List
 # pypi
 import pandas as pd
 import sqlalchemy
-from sqlalchemy import sql, text, Table, Integer, Boolean
+from sqlalchemy import sql, text, Table, Integer, Boolean, func
 from sqlalchemy.dialects.mssql import BIGINT, BIT, INTEGER, SMALLINT, TINYINT
 from sqlalchemy.exc import IntegrityError
 
@@ -126,6 +126,19 @@ class BaseTable(object):
         """
         stmt = sql.select([self.table_def])
         return self.execute_read(stmt)
+
+    def row_count(self):
+        """
+        Select count
+
+        :returns: int of number of rows
+        """
+        select_stmt = sql.select(func.count().label("row_count")).select_from(self.table_def)
+        logging.info(str(select_stmt))
+        read_df = self.execute_read(select_stmt)
+        print(read_df)
+        if len(read_df) == 1:
+            return read_df['row_count'].iloc[0]
 
     def bulk_insert(self, df):
         """

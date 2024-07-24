@@ -17,6 +17,10 @@ from domain.python_tools import get_current_callable
 from domain.repositories import SupplementaryRepository, TransactionRepository, TransactionProcessingQueueRepository
 
 
+# globals
+TINY = 0.000001  # APXTxns.pm line 10, apx2txnrpts.pl line 87
+
+
 @dataclass
 class TransactionProcessingEngine(ABC):
     source_queue_repo: TransactionProcessingQueueRepository  # we'll read from this queue to detect new transactions for processing, and update status post-processing
@@ -107,14 +111,10 @@ class StraightThruTransactionProcessingEngine(TransactionProcessingEngine):
 @dataclass
 class LWTransactionSummaryEngine(TransactionProcessingEngine):
     """ Generate LW Transaction Summary. See http://lwweb/wiki/bin/view/Systems/ApxSmes/LWTransactionCustomization """
-    # TODO_CLEANUP: remove unneeded attributes below
     source_txn_repo: TransactionRepository  # We'll initially pull the transactions from here
-    # dividends_repo: TransactionRepository  # We'll separately pull dividends from here
     preprocessing_supplementary_repos: List[SupplementaryRepository]  # We'll supplement with data from these
     prev_bday_cost_repo: SupplementaryRepository  # To retrieve cost info if needed
-    # transaction_name_repo: SupplementaryRepository  # To get transaction names, at the end
-    # historical_transaction_repo: TransactionRepository  # We'll query from this when needed, to find historical transactions
-
+    
     def preprocessing_supplement(self, transactions: List[Transaction]):
         # Supplement with "pre-processing" supplementary repos, to get additional fields
         for txn in transactions:
@@ -431,6 +431,7 @@ class LWTransactionSummaryEngine(TransactionProcessingEngine):
         # APXTxns.pm line 1411-1456 and APXTxns.pm::build_txn_grouping_for_report
         group_by_fields = ['TradeCcy', 'PortfolioCode', 'Symbol', 'SecurityId', 'TradeDate', 'SettleDate', 'Comment01']
         wd_reverse_fields = ['Quantity', 'TradeAmount', 'Commission', 'Taxes', 'Charges', 'TradeAmountLocal']
+        wd_abs_val_fields = ['Quantity', 'TradeAmount', 'Commission', 'Taxes', 'Charges', 'TradeAmountLocal']
         sum_fields = ['Quantity', 'TradeAmount', 'TradeAmountLocal', 'Commission', 'Taxes', 'Charges', 'RealizedGain'
                         , 'NetInterest', 'NetDividend', 'NetEligDividend', 'NetNonEligDividend', 'NetFgnIncome'
                         , 'CapGainsDistrib', 'RetOfCapital', 'TotalIncome', 'TfsaContribAmt', 'RspContribAmt']
@@ -479,20 +480,32 @@ class LWTransactionSummaryEngine(TransactionProcessingEngine):
             group_key_dict = dict(group_key)
             
             # 2. Add deposits for any grouped sums with positive trade amounts
-            if group_txn_with_sums.get('TradeAmount', 0.0) > 0.0:
+            if group_txn_with_sums.get('TradeAmount', 0.0) > 0.0 and abs(group_txn_with_sums.get('TradeAmount', 0.0)) > TINY:
+                # APXTxns.pm line 1477: only save txn if abs(TradeAmount) > TINY
                 group_txn_with_sums['TransactionCode'] = 'dp'
                 group_txn_with_sums['TransactionName'] = 'Contribution'
+
                 aggregate_deposit_txn = Transaction(**group_txn_with_sums)
+                
+                if len(aggregate_deposit_txn.All_LocalTranKeys) > 1:
+                    aggregate_deposit_txn.add_lineage(f"Combined the following dp/wd's which had matching {', '.join(group_by_fields)}: {', '.join(aggregate_withdrawal_txn.All_LocalTranKeys)}; "
+                                                            f"The following had their signs reversed for wd's: {', '.join(wd_reverse_fields)}; "
+                                                            f"The following were then summed: {', '.join(sum_fields)}"
+                        , source_callable=get_current_callable()
+                    )
+
                 transactions.append(aggregate_deposit_txn)
 
             # 3. Add withdrawals for any grouped sums with negative trade amounts
-            if group_txn_with_sums.get('TradeAmount', 0.0) < 0.0:
+            if group_txn_with_sums.get('TradeAmount', 0.0) < 0.0 and abs(group_txn_with_sums.get('TradeAmount', 0.0)) > TINY:
+                # APXTxns.pm line 1477: only save txn if abs(TradeAmount) > TINY
                 # Negative trade amount -> withdrawal 
                 group_txn_with_sums['TransactionCode'] = 'wd'
                 group_txn_with_sums['TransactionName'] = 'Withdrawal'
 
                 # It's expected that other values will be negative; we want to change them to their absolute value:
-                for sf in sum_fields:
+                # APXTxns.pm line 1440
+                for sf in wd_abs_val_fields:
                     abs_val = abs(group_txn_with_sums.get(sf, 0.0))
                     group_txn_with_sums[sf] = abs_val
 
@@ -501,6 +514,7 @@ class LWTransactionSummaryEngine(TransactionProcessingEngine):
                     aggregate_withdrawal_txn.add_lineage(f"Combined the following dp/wd's which had matching {', '.join(group_by_fields)}: {', '.join(aggregate_withdrawal_txn.All_LocalTranKeys)}; "
                                                             f"The following had their signs reversed for wd's: {', '.join(wd_reverse_fields)}; "
                                                             f"The following were then summed: {', '.join(sum_fields)}"
+                        , source_callable=get_current_callable()
                     )
                 transactions.append(aggregate_withdrawal_txn)
 
@@ -682,8 +696,8 @@ class LWTransactionSummaryEngine(TransactionProcessingEngine):
     def reverse_amount_signs(self, txn: Transaction):
         # apx2txnrpts.pl line 1427-1435 + 1449-1458
         if txn.TransactionCode in ('lo', 'wd', 'ex', 'ep', 'wt'):
-            txn.TradeAmount = -1.0 * txn.TradeAmount
-            txn.TradeAmountLocal = -1.0 * txn.TradeAmountLocal
+            txn.TradeAmount = -1.0 * txn.TradeAmount if abs(txn.TradeAmount) > TINY else None
+            txn.TradeAmountLocal = -1.0 * txn.TradeAmountLocal if abs(txn.TradeAmountLocal) > TINY else None
             txn.add_lineage(f"{txn.TransactionCode} -> reversed signs for TradeAmount and TradeAmountLocal", source_callable=get_current_callable())
 
     def assign_name4stmt_for_client_wd_dp(self, txn: Transaction):
@@ -699,9 +713,15 @@ class LWTransactionSummaryEngine(TransactionProcessingEngine):
     def unassign_gains_proceeds_quantity_if_zero(self, txn: Transaction):
         # apx2txnrpts.pl line 1459-1464
         for attr in ('RealizedGain', 'Proceeds', 'Quantity'):
-            if not getattr(txn, attr, None):
+            prev_value = getattr(txn, attr, None)
+            if not prev_value:
                 setattr(txn, attr, None)  
-                txn.add_lineage(f"nulled out {attr}, since it was zero", source_callable=get_current_callable())
+                txn.add_lineage(f"nulled out {attr}, since it was effectively zero (previous value: {prev_value})", source_callable=get_current_callable())
+                # TODO: Using setattr rather than delattr to make it traceable... 
+                # but perhaps delattr is more readable? And aligned better to the perl equivalent?
+            elif abs(prev_value) < TINY:  # TINY from apx2txnrpts.pl line 87
+                setattr(txn, attr, None)  
+                txn.add_lineage(f"nulled out {attr}, since it was effectively zero (previous value: {prev_value})", source_callable=get_current_callable())
                 # TODO: Using setattr rather than delattr to make it traceable... 
                 # but perhaps delattr is more readable? And aligned better to the perl equivalent?
 
@@ -733,22 +753,6 @@ class LWTransactionSummaryEngine(TransactionProcessingEngine):
             transactions = source_transactions.copy()
             logging.info(f'{self.cn} found {len(transactions)} transactions from {self.source_txn_repo.cn}')
 
-        # TODO_CLEANUP: remove below block, once confirmed not used
-        # source_dividends = self.dividends_repo.get(portfolio_code=queue_item.portfolio_code, trade_date=queue_item.trade_date)
-        # dividends = source_dividends.copy()
-        # logging.info(f'{self.cn} found {len(dividends)} dividends from {self.dividends_repo.cn}')
-
-        # # Remove dividends from generic transactions
-        # transactions = [t for t in transactions if t.TransactionCode != 'dv']
-
-        # # Remove transactions which were already "merged" into the dividends
-        # dividends_merged_transactions = []
-        # for d in dividends:
-        #     dividends_merged_transactions.extend(d.transactions_merged_in)
-        # transactions = [t for t in transactions if t not in dividends_merged_transactions]
-
-        # transactions.extend(dividends)
-
         # First, supplement with "pre-processing" supplementary repos, to get additional fields
         self.preprocessing_supplement(transactions)
         
@@ -768,23 +772,6 @@ class LWTransactionSummaryEngine(TransactionProcessingEngine):
                     # This should cover part of APXTxns.pm line 850-859
                     self.prev_bday_cost_repo.supplement(txn)
             
-            # TODO_CLEANUP: remove this block once not needed, since dividends will be provided by the dividends_repo
-            # 1. Dividends: combine up to 3 transactions in APX into a single transaction:
-                    # If the dividend settles (i.e. 'pay date') in the date range requested then find the associated 'dv' and merge it into the transaction.
-                    # If the dividend paid in a foreign currency then find the associated FX trade and merge it into the transaction.
-            # for txn in transactions:
-            #     if (txn.TransactionCode == 'dv'):
-            #         pass
-                    # APXTxns.pm line 344-524
-                    # txn.TradeDate = txn.SettleDate
-                    # 1a. find the matching dp/wd/sl
-                    
-
-                # Remove dividends, since they will be provided by the dividends_repo
-                # if txn.TransactionCode == 'dv':
-                #     indices_to_remove.append(i)
-                #     continue
-
                 # APXTxns.pm line 759-827
                 if txn.TransactionCode in ('dp', 'wd'):
                     self.massage_deposits_withdrawals(txn)
@@ -796,28 +783,13 @@ class LWTransactionSummaryEngine(TransactionProcessingEngine):
                 if txn.Symbol1 == 'cash' and txn.Symbol2 == 'cash' and txn.TransactionCode in ('sl', 'by'):
                     raise TransactionShouldBeRemovedException(txn)
 
-                # APXTxns.pm line 850-859
-                # TODO_CLEANUP: remove when not needed - this is now provided by LWDBAPXAppraisalPrevBdayRepository supplement method
-                # if txn.TransactionCode == 'lo':
-                #     if txn.LocalCostPerUnit:
-                #         txn.LocalCostBasis = txn.LocalCostPerUnit * txn.Quantity
-                #     if txn.RptlCostPerUnit:
-                #         txn.LocalCostBasis = txn.RptCostPerUnit * txn.Quantity
-
+                # APXTxns.pm line 850-859: provided by LWDBAPXAppraisalPrevBdayRepository supplement method
                 
                 if txn.TransactionCode == 'li':
                     self.assign_cost_basis(txn)
 
-                # APXTxns.pm line 873-890
-                # TODO_CLEANUP: remove when not needed - this is now provided by LWDBAPXAppraisalPrevBdayRepository supplement method
-                # if txn.SecTypeCode1 == 'st' and txn.TransactionCode == 'sl':
-                #     if txn.LocalCostPerUnit:
-                #         txn.LocalCostBasis = txn.LocalCostPerUnit * txn.Quantity
-                #     if txn.RptlCostPerUnit:
-                #         txn.LocalCostBasis = txn.RptCostPerUnit * txn.Quantity
-
-
-
+                # APXTxns.pm line 873-890: provided by LWDBAPXAppraisalPrevBdayRepository supplement method
+                
             # 6. Massage sales of ST securities to recover cost and treat gains as accrued interest (using cost information from above)
             
                 # N/A (this will have already been done via supplementing the txn with supplementary repo(s))
