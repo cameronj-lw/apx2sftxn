@@ -7,68 +7,49 @@ import logging
 import math
 import numbers
 import os
-from typing import List, Optional, Union
+from typing import List, Optional, Tuple, Union
+
+# pypi
 
 
 # native
 from application.exceptions import TransactionShouldBeAddedException, TransactionShouldBeRemovedException
-from domain.models import QueueStatus, Transaction, TransactionProcessingQueueItem
+from domain.models import Transaction
 from domain.python_tools import get_current_callable
-from domain.repositories import SupplementaryRepository, TransactionRepository, TransactionProcessingQueueRepository
-
+from domain.repositories import TransactionRepository, SupplementaryRepository
 
 # globals
-TINY = 0.000001  # APXTxns.pm line 10, apx2txnrpts.pl line 87
-
+TINY = 0.000001  # APXTxns.pm line 10, apx2txnrpts.pl line 87  # TODO: move somewhere else?
 
 @dataclass
-class TransactionProcessingEngine(ABC):
-    source_queue_repo: TransactionProcessingQueueRepository  # we'll read from this queue to detect new transactions for processing, and update status post-processing
-    target_txn_repos: List[TransactionRepository]  # we'll save results here
-    target_queue_repos: List[TransactionProcessingQueueRepository]  # we'll save as PENDING queue_status here
+class TransactionQueryHandler(ABC):
+    """ Default base class for custom transaction queries """
+    source_txn_repo: TransactionRepository  # We'll initially pull the transactions from here
+    preprocessing_supplementary_repos: List[SupplementaryRepository]  # We'll supplement with data from these
 
-    def run(self):
-        """ Subclasses may override if this default behaviour is not desired """
-        # TODO: Should this be made to accept optional starting_transactions? And/or return the results?
-        # Unsure if accepting starting_transactions from multiple portfolios/dates would work...
+    def preprocessing_supplement(self, transactions: List[Transaction]):
+        """ Default supplementing behaviour """
+        # Supplement with "pre-processing" supplementary repos, to get additional fields
+        for sr in self.preprocessing_supplementary_repos:
+            logging.info(f'Supplementing with {sr.cn}')  # TODO_CLEANUP: performance logging
+            for txn in transactions:
+                txn.trade_date_original = txn.TradeDate  # Since for dividends, we may change the TradeDate later
+                if supplemental_data := sr.supplement(txn):
+                    column_mappings_str = [f'{cm.supplementary_column_name}={getattr(txn, cm.transaction_column_name)}' 
+                                                for cm in sr.pk_columns]
+                    txn.add_lineage(f"Supplemented by {sr.cn}, based on ({', '.join(column_mappings_str)})"
+                                    , source_callable=get_current_callable())
 
-        # Get new transactions to process
-        items_to_process = self.source_queue_repo.get(queue_status=QueueStatus.PENDING)
-        logging.debug(f'{self.source_queue_repo.cn} found {len(items_to_process)} PENDING')
+    def handle(self, portfolio_code: Union[str,None]=None, trade_date: Union[datetime.date, Tuple[datetime.date, datetime.date], None]=None) -> List[Transaction]:
+        source_txns = self.source_txn_repo.get(portfolio_code, trade_date)
+        logging.info(f'{self.cn} got {len(source_txns)} from {self.source_txn_repo.cn}')
+        self.preprocessing_supplement(source_txns)
+        logging.info(f'{self.cn} supplemented with {len(self.preprocessing_supplementary_repos)} repos')  # TODO_CLEANUP: performance logging
+        return self.process(starting_transactions=source_txns)
 
-        # Build resulting items to save to target_queue_repos
-        for item in items_to_process:
-            
-            # Update to IN_PROGRESS
-            old_queue_status = item.queue_status
-            item.queue_status = QueueStatus.IN_PROGRESS
-            queue_update_res = self.source_queue_repo.update_queue_status(queue_item=item, old_queue_status=old_queue_status)
-
-            result = self.process(queue_item=item)
-
-            # If result is empty, we still want artificially generate a single "result".
-            # This will facilitate deleting of old records for the portfolio & trade date,
-            # and inserting of a "blank" record to show that the calculation & storing succeeded, but there were 0 transactions.
-            if not len(result):
-                result = [Transaction(**{'portfolio_code': item.portfolio_code
-                                            , 'trade_date': item.trade_date
-                                            , 'trade_date_original': item.trade_date
-                                            , 'modified_by': f"{os.environ.get('APP_NAME')}_{str(self)}" 
-                                        })]
-            
-            # Now we have the results. Save them:
-            for repo in self.target_txn_repos:
-                logging.info(f'Creating transactions in {repo.cn}...')
-                create_res = repo.create(transactions=result)
-            
-            for repo in self.target_queue_repos:
-                logging.info(f'Creating queue item in {repo.cn}...')
-                create_res = repo.create(queue_item=TransactionProcessingQueueItem(portfolio_code=item.portfolio_code, trade_date=item.trade_date, queue_status=QueueStatus.PENDING))
-
-            # Update to SUCCESS
-            old_queue_status = item.queue_status
-            item.queue_status = QueueStatus.SUCCESS
-            queue_update_res = self.source_queue_repo.update_queue_status(queue_item=item, old_queue_status=old_queue_status)
+    @abstractmethod
+    def process(self, starting_transactions: List[Transaction]) -> List[Transaction]:
+        """ Subclasses must implement their own processing logic """
 
     @property
     def cn(self):  # Class name. Avoids having to print/log type(self).__name__.
@@ -77,54 +58,11 @@ class TransactionProcessingEngine(ABC):
     def __str__(self):
         return self.cn
 
-    @abstractmethod
-    def process(self, queue_item: Optional[TransactionProcessingQueueItem]=None
-                    , starting_transactions: Optional[List[Transaction]]=None) -> List[Transaction]:
-        """ Subclasses must implement their own processing logic """
-
 
 @dataclass
-class StraightThruTransactionProcessingEngine(TransactionProcessingEngine):
-    """ Straightforward engine, to simply get transactions from the source_repo """
-    source_txn_repo: TransactionRepository
-
-    def process(self, queue_item: Optional[TransactionProcessingQueueItem]=None
-                    , starting_transactions: Optional[List[Transaction]]=None) -> List[Transaction]:
-        # TODO: should this support a caller providing starting_transactions?
-        logging.info(f'{self.cn} processing {queue_item}')
-        res_transactions = self.source_txn_repo.get(portfolio_code=queue_item.portfolio_code, trade_date=queue_item.trade_date)
-        
-        # Populate the portfolio_code, modified_by, trade_date, lineage
-        for txn in res_transactions:
-            txn.portfolio_code = queue_item.portfolio_code
-            txn.trade_date = queue_item.trade_date
-            txn.modified_by = f"{os.environ.get('APP_NAME')}_{str(self)}"
-            txn.add_lineage(f"{str(self.source_txn_repo)}"
-                                , source_callable=get_current_callable())
-
-        return res_transactions
-
-    def __str__(self):
-        return f'{str(self.source_txn_repo)}-Engine'
-
-
-@dataclass
-class LWTransactionSummaryEngine(TransactionProcessingEngine):
+class LWTransactionSummaryQueryHandler(TransactionQueryHandler):
     """ Generate LW Transaction Summary. See http://lwweb/wiki/bin/view/Systems/ApxSmes/LWTransactionCustomization """
-    source_txn_repo: TransactionRepository  # We'll initially pull the transactions from here
-    preprocessing_supplementary_repos: List[SupplementaryRepository]  # We'll supplement with data from these
     prev_bday_cost_repo: SupplementaryRepository  # To retrieve cost info if needed
-    
-    def preprocessing_supplement(self, transactions: List[Transaction]):
-        # Supplement with "pre-processing" supplementary repos, to get additional fields
-        for txn in transactions:
-            txn.trade_date_original = txn.TradeDate  # Since for dividends, we may change the TradeDate later
-            for sr in self.preprocessing_supplementary_repos:
-                if supplemental_data := sr.supplement(txn):
-                    column_mappings_str = [f'{cm.supplementary_column_name}={getattr(txn, cm.transaction_column_name)}' 
-                                                for cm in sr.pk_columns]
-                    txn.add_lineage(f"Supplemented by {sr.cn}, based on ({', '.join(column_mappings_str)})"
-                                        , source_callable=get_current_callable())
 
     def assign_fx_rate(self, txn: Transaction):
         # APXTxns.pm line 721-734: assign fx rate
@@ -734,27 +672,19 @@ class LWTransactionSummaryEngine(TransactionProcessingEngine):
             txn.CashFlow = txn.TradeAmount
             txn.add_lineage(f"{txn.TransactionCode} -> set CashFlow as TradeAmount", source_callable=get_current_callable())
 
-    def assign_standard_attributes(self, txn: Transaction, queue_item: TransactionProcessingQueueItem):
+    def assign_standard_attributes(self, txn: Transaction):
         # Populate the portfolio_code, modified_by, trade_date
-        txn.portfolio_code = queue_item.portfolio_code
-        txn.trade_date_original = queue_item.trade_date
+        txn.portfolio_code = txn.PortfolioCode
+        txn.trade_date_original = txn.TradeDate
         txn.modified_by = f"{os.environ.get('APP_NAME')}_{str(self)}"
 
-
-    def process(self, queue_item: Optional[TransactionProcessingQueueItem]=None
-                    , starting_transactions: Optional[List[Transaction]]=None) -> List[Transaction]:
-
-        if starting_transactions:
-            transactions = starting_transactions.copy()
-        else:
-            logging.info(f'{self.cn} processing {queue_item}')
-            
-            source_transactions = self.source_txn_repo.get(portfolio_code=queue_item.portfolio_code, trade_date=queue_item.trade_date)
-            transactions = source_transactions.copy()
-            logging.info(f'{self.cn} found {len(transactions)} transactions from {self.source_txn_repo.cn}')
+    def process(self, starting_transactions: List[Transaction]) -> List[Transaction]:
+        # Copy to avoid modifying the list provided as parameter
+        transactions = starting_transactions.copy()
 
         # First, supplement with "pre-processing" supplementary repos, to get additional fields
-        self.preprocessing_supplement(transactions)
+        # self.preprocessing_supplement(transactions)  # removed since this is now done inside handle
+        # return transactions  # debug - when not using all supplementary repos, uncomment this to avoid errors due to attributes missing
         
         # Track indices of items to be removed
         indices_to_remove = []
@@ -764,10 +694,13 @@ class LWTransactionSummaryEngine(TransactionProcessingEngine):
         for i, txn in enumerate(transactions):
 
             try:
-                # 0a. Assign FX rate
+                # 0a. Add standard attributes
+                self.assign_standard_attributes(txn)
+
+                # 0b. Assign FX rate
                 self.assign_fx_rate(txn)
 
-                # 0b. Pull prev bday cost info, if needed
+                # 0c. Pull prev bday cost info, if needed
                 if (txn.SecTypeBaseCode1 == 'st' and txn.TransactionCode == 'sl') or txn.TransactionCode == 'lo':
                     # This should cover part of APXTxns.pm line 850-859
                     self.prev_bday_cost_repo.supplement(txn)
@@ -900,120 +833,7 @@ class LWTransactionSummaryEngine(TransactionProcessingEngine):
 
             self.assign_cash_flow(txn)
 
-            self.assign_standard_attributes(txn, queue_item)
-
         return transactions
-
-    def __str__(self):
-        return f'LW-Transaction-Summary-Engine'
-
-
-@dataclass
-class LWAPX2SFTransactionEngine(TransactionProcessingEngine):
-    """ Generate txns for sending to SF. See http://lwweb/wiki/bin/view/Systems/ApxSmes/APXToSFTXN """
-    source_txn_repo: TransactionRepository  # We'll initially pull the transactions from here
-    preprocessing_supplementary_repos: List[SupplementaryRepository]  # We'll supplement with data from these
-    fx_rate_repo: SupplementaryRepository  # We'll use this to get the portf2firm currency FX rate (if different)
-
-    def preprocessing_supplement(self, transactions: List[Transaction]):
-        # Supplement with "pre-processing" supplementary repos, to get additional fields
-        for txn in transactions:
-            txn.trade_date_original = txn.TradeDate  # Since for dividends, we may change the TradeDate later
-            for sr in self.preprocessing_supplementary_repos:
-                sr.supplement(txn)
-
-    def get_portfolio2firm_fx_rate(self, txn: Transaction):
-        # If CAD portfolio, return 1.0 - no need to query
-        if txn.ReportingCurrencyCode == 'ca':
-            return 1.0
-
-        # Query provided repo for these values
-        pk_column_values = {
-            'PriceDate'                 : txn.TradeDate,
-            'NumeratorCurrencyCode'     : 'ca',  # Because it's the firm currency (CAD)
-            'DenominatorCurrencyCode'   : txn.ReportingCurrencyCode,
-        }   
-        get_res = self.fx_rate_repo.get(pk_column_values=pk_column_values)
-
-        return get_res.get('SpotRate')
-
-    def assign_tradedate_settledate_dt(self, txn: Transaction):
-        # apx2sf.pl line 2788-2793
-        txn.TradeDateDT = txn.TradeDate
-        txn.SettleDateDT = txn.SettleDate
-
-    def assign_cash_flow_local(self, txn: Transaction):
-        # apx2sf.pl line 2857-2865
-        if trade_amount_local := getattr(txn, 'TradeAmountLocal', None):
-            if txn.TransactionCode in ('by'):
-                txn.CashFlowLocal = -1.0 * trade_amount_local
-            else:
-                txn.CashFlowLocal = trade_amount_local
-
-    def assign_trade_amt_cash_flow_firm_ccy(self, txn: Transaction, portfolio2firm_fx_rate: float):
-        # apx2sf.pl line 2916-2944: Assign TradeAmount & CashFlow in firm ccy
-        for attr in ('TradeAmount', 'CashFlow'):
-            if portf_ccy_attr_val := getattr(txn, attr, None):
-                firm_ccy_val = portf_ccy_attr_val * portfolio2firm_fx_rate
-                setattr(txn, f'{attr}Firm', firm_ccy_val)
-
-    
-    def process(self, queue_item: Optional[TransactionProcessingQueueItem]=None
-                    , starting_transactions: Optional[List[Transaction]]=None) -> List[Transaction]:
-                    
-        if starting_transactions:
-            transactions = starting_transactions.copy()
-        else:
-            logging.info(f'{self.cn} processing {queue_item}')
-            
-            source_transactions = self.source_txn_repo.get(portfolio_code=queue_item.portfolio_code, trade_date=queue_item.trade_date)
-            transactions = source_transactions.copy()
-            logging.info(f'{self.cn} found {len(transactions)} transactions from {self.source_txn_repo.cn}')
-
-        # Supplement with specified repo(s)
-        self.preprocessing_supplement(transactions)
-
-        # We'll read FX rate once rather than for every txn, for performance:
-        portfolio2firm_fx_rate = None
-
-        # Loop through transactions
-        for txn in transactions:
-            if not portfolio2firm_fx_rate:
-                portfolio2firm_fx_rate = self.get_portfolio2firm_fx_rate(txn)
-
-            self.assign_tradedate_settledate_dt(txn)
-
-            # apx2sf.pl line 2803-2856: # not needed as this is already done by LWTransactionSummaryEngine
-            # see null_fields_for_dv, reverse_amount_signs, assign_name4stmt_for_client_wd_dp, unassign_gains_proceeds_quantity_if_zero, assign_cash_flow
-
-            self.assign_cash_flow_local(txn)
-
-            # apx2sf.pl line 2876-2881: Check for APX vs SF mismatch in portfolio currency
-            if (apx_portf_ccy_iso := getattr(txn, 'PortfolioISOCode', None)) and (sf_portf_ccy_iso := getattr(txn, 'PortfolioCurrencyISOCode', None)):
-                if apx_portf_ccy_iso != sf_portf_ccy_iso:
-                    warn_msg = f'{txn.PortfolioCode} ({apx_portf_ccy_iso}): APX vs SF MISMATCH on portfolio reporting currency, using SF ({sf_portf_ccy_iso})'
-                    logging.error(warn_msg)
-                    txn.WarnCode = 1
-                    txn.Warning = warn_msg
-                    # TODO_EH: further error handling here? 
-
-            # apx2sf.pl line 2892-2897: Check for APX vs SF mismatch in stmt group currency
-            if (apx_group_ccy_iso := getattr(txn, 'PortfolioGroupISOCode', None)) and (sf_group_ccy_iso := getattr(txn, 'StatementGroupCurrencyISOCode', None)):
-                if apx_group_ccy_iso != sf_group_ccy_iso:
-                    warn_msg = f'{txn.PortfolioCode} ({apx_group_ccy_iso}): APX vs SF MISMATCH on stmt group reporting currency, using SF ({sf_group_ccy_iso})'
-                    logging.error(warn_msg)
-                    txn.WarnCode = 1
-                    txn.Warning = warn_msg
-                    # TODO_EH: further error handling here? 
-
-            self.assign_trade_amt_cash_flow_firm_ccy(txn, portfolio2firm_fx_rate)
-
-        # Now we have processed the transactions. Return them:
-        return transactions
-
-    def __str__(self):
-        return f'LW-APX2SF-Transaction-Engine'
-
 
 
 

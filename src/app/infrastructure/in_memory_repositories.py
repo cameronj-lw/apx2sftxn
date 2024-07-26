@@ -50,40 +50,43 @@ class InMemoryRepository(SupplementaryRepository):
         return values
 
 
-@dataclass
 class InMemorySingletonSQLRepository(InMemoryRepository):
-    sql_source: Type[Union[BaseTable,BaseStoredProc,None]] = None
     _instance = None
-    portfolio_code_columns = ['PortfolioCode', 'PortfolioBaseCode']
-    trade_date_columns = ['TradeDate']
-    relevant_columns: List[str] = field(default_factory=list)
+    _initialized = False
 
-    def __post_init__(self):
-        # Read initial data into df
-        logging.info(f'Initializing {self.cn} with data from {self.sql_source.__name__}')
+    def __new__(cls, *args, **kwargs):
+        if cls._instance is None:
+            cls._instance = super(InMemorySingletonSQLRepository, cls).__new__(cls)
+        return cls._instance
+
+    def __init__(self, pk_columns=None, sql_source=None, portfolio_code_columns=None, trade_date_columns=None, relevant_columns=None):
+        if self._initialized:
+            return
+        self._initialized = True
+
+        self.pk_columns = pk_columns if pk_columns else []
+        self.sql_source = sql_source
+        self.portfolio_code_columns = portfolio_code_columns if portfolio_code_columns else ['PortfolioCode', 'PortfolioBaseCode']
+        self.trade_date_columns = trade_date_columns if trade_date_columns else ['TradeDate']
+        self.relevant_columns = relevant_columns if relevant_columns else []
+        self.current_data = {}
+
+        if self.sql_source:
+            logging.info(f'Initializing {self.__class__.__name__} with data from {self.sql_source.__name__}')
         self.refresh()
 
-        # initial_data_df = self.sql_source().read()
-
-        # # Convert df to dict. Keys in dict wil be tuples with values of each PK column
-        # pk_col_names = [cm.supplementary_column_name for cm in self.pk_columns]
-        # initial_data = df_to_dict(df=initial_data_df, pk_col_names=pk_col_names)
-
-        # # Now we have the dict. Store it as current_data.
-        # self.current_data = initial_data
-
-    def refresh(self, params: Dict={}):
+    def refresh(self, params: Dict = {}):
         """ Refresh in-memory data for provided criteria """
+        if not self.sql_source:
+            raise ValueError("sql_source is not defined.")
+        
         new_data_df = self.sql_source().read(**params)
 
-        # condense to only relevant columns
-        # If there are no relevant_columns provided, the assumption is all columns should remain.
         if len(self.relevant_columns):
             all_relevant_columns = (self.relevant_columns + self.portfolio_code_columns + self.trade_date_columns
-                                        + [cm.supplementary_column_name for cm in self.pk_columns])
+                                    + [cm.supplementary_column_name for cm in self.pk_columns])
             new_data_df = new_data_df.reindex(columns=set(all_relevant_columns).intersection(new_data_df.columns))
 
-        # Add portfolio_code and trade_date, if they DNE
         if 'portfolio_code' not in new_data_df.columns:
             for col in self.portfolio_code_columns:
                 if col in new_data_df.columns:
@@ -94,24 +97,10 @@ class InMemorySingletonSQLRepository(InMemoryRepository):
                 if col in new_data_df.columns:
                     new_data_df['trade_date'] = new_data_df[col]
 
-        # Convert df to dict. Keys in dict wil be tuples with values of each PK column
         pk_col_names = [cm.supplementary_column_name for cm in self.pk_columns]
         new_data = df_to_dict(df=new_data_df, pk_col_names=pk_col_names)
-
-        # Now we have the dict. Update the existing one.
+        logging.debug(f'{self.cn} refreshing for {new_data}')  # TODO_CLEANUP: too verbose
         self.current_data.update(new_data)
-
-    @classmethod
-    def get_instance(cls):
-        if cls._instance is None:
-            cls._instance = cls()
-        return cls._instance
-
-    def __new__(cls, *args, **kwargs):
-        # Override default python method to enforce singularity
-        if cls._instance is None:
-            cls._instance = super().__new__(cls)
-        return cls._instance
 
 
 class APXRepDBSecurityHashInMemoryRepository(InMemorySingletonSQLRepository):

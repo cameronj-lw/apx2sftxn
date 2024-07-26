@@ -1287,6 +1287,7 @@ class COREDBSFTransactionRepository(TransactionRepository):
         Txn2TableColMap('Warning'          , 'warning'
                             , lambda x: '' if x is None or not x else x),
         Txn2TableColMap('trade_date_original', 'trade_date_original'),
+        Txn2TableColMap('TradeDate'        , 'sf_status', lambda x: 'PENDING'),
     ]
 
     def create(self, transactions: Union[List[Transaction],Transaction]) -> int:

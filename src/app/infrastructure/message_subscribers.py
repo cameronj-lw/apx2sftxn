@@ -41,6 +41,7 @@ from infrastructure.sql_tables import (
 )
 from infrastructure.util.config import AppConfig
 from infrastructure.util.dataframe import delete_rows, df_to_dict
+from infrastructure.util.date import since_epoch_to_datetime
 from infrastructure.util.logging import get_log_file_name
 
 
@@ -399,7 +400,7 @@ class KafkaAPXTransactionMessageConsumer(KafkaMessageConsumer):
                     # Initial message consumption may take up to
                     # `session.timeout.ms` for the consumer group to
                     # rebalance and start consuming
-                    logging.info("Waiting...")
+                    logging.debug("Waiting...")
                     
                     # Save heartbeat
                     if self.heartbeat_repo:
@@ -450,6 +451,7 @@ class KafkaAPXTransactionMessageConsumer(KafkaMessageConsumer):
                                         # TODO_EH: raise exception?
 
                                 # Now refresh the in-memory repo for params
+                                logging.info(f'Refreshing for {params}')  # TODO_CLEANUP: too verbose
                                 r.repo_class().refresh(params)
 
                         except Exception as e:

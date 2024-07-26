@@ -4,7 +4,9 @@ from dataclasses import dataclass, field
 import datetime
 from enum import Enum
 import inspect
+import numpy as np
 import os
+import pandas as pd
 from types import SimpleNamespace
 from typing import Callable, Optional, Union
 
@@ -27,6 +29,29 @@ class Transaction(SimpleNamespace):
             return f"{self.TransactionCode} of {self.Quantity} units of {self.SecurityID1} in {self.PortfolioID} on {self.TradeDate}"
         except Exception as e:
             return super().__str__()
+
+    def to_dict(self):
+        """
+        Convert the SimpleNamespace instance to a dictionary with datetime and Timestamp
+        attributes formatted as ISO 8601 strings, and int-like attributes casted as int
+        """
+        def serialize_value(value):
+            if isinstance(value, (datetime.datetime, datetime.date, pd.Timestamp)):
+                return value.isoformat()
+            elif isinstance(value, (np.int64, np.int32, np.int16, np.int8)):
+                return int(value)  # Convert pd.Int64 to int
+            elif isinstance(value, (SimpleNamespace, dict)):
+                return serialize_object(value)
+            return value
+
+        def serialize_object(obj):
+            if isinstance(obj, SimpleNamespace):
+                return {k: serialize_value(v) for k, v in vars(obj).items()}
+            elif isinstance(obj, dict):
+                return {k: serialize_value(v) for k, v in obj.items()}
+            return obj
+
+        return serialize_object(self)
 
     def get_lineage_msg_prefix(self, source_callable: Optional[Callable]=None) -> str:
         """ Get desired prefix to add context to lineage """

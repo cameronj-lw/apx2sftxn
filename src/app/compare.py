@@ -83,7 +83,8 @@ def main():
     exclude_columns = ['record_id', 'scenario', 'data_handle', 'asofdate', 'asofuser', 'scenariodate', 'computer'
         , 'gendate', 'moddate', 'genuser', 'moduser'
         , 'lw_lineage'
-        , 'lw_id', 'trade_date_original', 'portfolio_id'  # cols DNE in old LW Txn Summary or APX2SFTXN
+        , 'lw_id', 'trade_date_original', 'portfolio_id'
+        , 'sf_status', 'sf_id', 'sf_comments'  # cols DNE in old LW Txn Summary or APX2SFTXN
         , 'sf_statement_group'  # thinking this is not needed for inclusion in new APX2SFTxn
         , 'security_id1', 'security_id2', 'price_per_unit_local'  # existing LW Transaction Summary doesn't save these to DB
         # , 'Portfolio__c'  # with MC running in test, there may be an incomplete SF dataset in most recent snap
