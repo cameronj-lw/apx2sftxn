@@ -8,6 +8,7 @@ import sqlalchemy
 from sqlalchemy import sql
 
 # native
+from infrastructure.sql_procs import APXRepDBGroupMembersFlattenedFunc
 from infrastructure.util.apxdb import wrap_in_session_procs
 from infrastructure.util.database import execute_multi_query, BaseDB, get_pyodbc_conn
 from infrastructure.util.table import BaseTable, ScenarioTable
@@ -508,6 +509,7 @@ class COREDBAPX2SFTxnQueueTable(BaseTable):
 class COREDBAPXfRealizedGainLossTable(BaseTable):
 	config_section = 'coredb'
 	table_name = 'apx_fRealizedGainLoss'
+	portfolio_code_expander = APXRepDBGroupMembersFlattenedFunc()
 
 	def read(self, portfolio_id=None, portfolio_code=None, from_date=None, to_date=None
 				, PortfolioTransactionID=None, TranID=None, LotNumber=None):
@@ -520,7 +522,8 @@ class COREDBAPXfRealizedGainLossTable(BaseTable):
 		if portfolio_id is not None:
 			stmt = stmt.where(self.c.portfolio_id == portfolio_id)
 		if portfolio_code is not None:
-			stmt = stmt.where(self.c.portfolio_code == portfolio_code)
+			if portfolio_code[0] != '@':
+				stmt = stmt.where(self.c.portfolio_code == portfolio_code)
 		if from_date is not None:
 			stmt = stmt.where(self.c.CloseDate >= from_date) if to_date else stmt.where(self.c.CloseDate == from_date)
 		if to_date is not None:
@@ -531,7 +534,20 @@ class COREDBAPXfRealizedGainLossTable(BaseTable):
 			stmt = stmt.where(self.c.TranID == TranID)
 		if LotNumber is not None:
 			stmt = stmt.where(self.c.LotNumber == LotNumber)
-		return self.execute_read(stmt)
+
+		# Get results
+		res = self.execute_read(stmt)
+		
+		# Filter to portfolios, if a non-consolidated group was provided
+		if portfolio_code is not None:
+			if portfolio_code[0] == '@':
+				# Expand into list of portfolio codes
+				portfolio_codes = self.portfolio_code_expander.get_portfolio_codes(portfolio_code)
+
+				# Filter to portfolio codes
+				res = res[res['portfolio_code'].isin(portfolio_codes)]
+
+		return res
 
 	
 class COREDBAPXfTransactionActivityTable(BaseTable):
@@ -596,17 +612,23 @@ class COREDBLWTransactionSummaryTable(BaseTable):
 		return self.execute_read(stmt)
 
 
-class COREDBSFTransactionTable(BaseTable):
+class COREDBSFTransactionTable(ScenarioTable):
 	config_section = 'coredb'
 	table_name = 'sf_transaction'
 
-	def read(self, portfolio_code=None, from_date=None, to_date=None, data_handle=None):
+	def read(self, portfolio_code=None, from_date=None, to_date=None, data_handle=None, scenario=None):
 		"""
 		Read all entries, optionally with criteria
 
 		:return: DataFrame
 		"""
 		stmt = sql.select(self.table_def)
+
+		if not scenario: 
+			scenario = self.base_scenario
+
+		stmt = stmt.where(self.c.scenario == scenario)
+
 		if portfolio_code is not None:
 			stmt = stmt.where(self.c.portfolio_code == portfolio_code)
 		if from_date is not None:

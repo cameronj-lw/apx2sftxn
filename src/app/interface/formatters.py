@@ -1,15 +1,26 @@
 
 # core python
+import json
 import logging
+import numpy as np
 from typing import List, Optional, Union, Tuple
+
+class CustomJSONEncoder(json.JSONEncoder):
+    def default(self, obj):
+        if isinstance(obj, float) and np.isnan(obj):
+            return None
+        return super(CustomJSONEncoder, self).default(obj)
 
 class DefaultRESTFormatter:
     # TODO: Create a multi-repo post formatter, e.g. for PriceByIMEX, 
     # to provide a full summary of inserts to mutliple repo's
 
     def success_get(self, data: Union[dict, list], message: Union[str,None]=None, status: str='success') -> Tuple[dict, int]:
+        # Recursively replace NaN values with None
+        clean_data = self._replace_nan_with_null(data)
+        
         res = ({
-            'data': data,
+            'data': clean_data,
             'message': message,
             'status': status,
         }, 200)
@@ -83,3 +94,12 @@ class DefaultRESTFormatter:
             'status': 'error', 
         }, http_return_code
 
+    def _replace_nan_with_null(self, obj):
+        if isinstance(obj, float) and np.isnan(obj):
+            return None
+        elif isinstance(obj, dict):
+            return {k: self._replace_nan_with_null(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [self._replace_nan_with_null(item) for item in obj]
+        else:
+            return obj

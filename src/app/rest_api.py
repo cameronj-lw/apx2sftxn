@@ -18,7 +18,7 @@ sys.path.append(src_dir)
 
 # native
 from application.query_handlers import (
-    LWTransactionSummaryQueryHandler
+    LWTransactionSummaryQueryHandler, LWAPX2SFTransactionQueryHandler
 )
 from infrastructure.in_memory_repositories import (
     APXDBvSecurityInMemoryRepository, APXRepDBSecurityHashInMemoryRepository,
@@ -27,6 +27,7 @@ from infrastructure.in_memory_repositories import (
     APXDBvCurrencyInMemoryRepository, APXDBvCustodianInMemoryRepository,
     APXDBvFXRateInMemoryRepository,
     APXRepDBvPortfolioAndStmtGroupCurrencyInMemoryRepository, CoreDBSFPortfolioLatestInMemoryRepository,
+    CoreDBRealizedGainLossInMemoryRepository,
 )
 from infrastructure.message_subscribers import KafkaAPXTransactionMessageConsumer
 from infrastructure.sql_repositories import (
@@ -34,9 +35,11 @@ from infrastructure.sql_repositories import (
     CoreDBRealizedGainLossSupplementaryRepository,
     LWDBAPXAppraisalPrevBdayRepository,
     MGMTDBHeartbeatRepository,
+    APXDBTransactionActivityRepository, APXDBRealizedGainLossSupplementaryRepository
 )
 from infrastructure.util.config import AppConfig
 from infrastructure.util.logging import setup_logging
+from interface.formatters import CustomJSONEncoder
 from interface.routes import blueprint  # import routes
 
 # Initialize the Flask app and register blueprint
@@ -55,42 +58,78 @@ def teardown(exception):
         logging.info(f'Received shutdown request. Exiting...')
         os._exit(0)
 
-# Initialize command handlers and query handlers
-lw_transaction_summary_query_handler = LWTransactionSummaryQueryHandler(
-    source_txn_repo = CoreDBTransactionActivityRepository(),
-    preprocessing_supplementary_repos = [
-        APXDBvPortfolioInMemoryRepository(),
-        APXDBvPortfolioBaseInMemoryRepository(),
-        APXDBvPortfolioBaseCustomInMemoryRepository(),
-        APXDBvPortfolioSettingExInMemoryRepository(),
-        APXDBvPortfolioBaseSettingExInMemoryRepository(),
-        APXDBvSecurityInMemoryRepository(), 
-        APXRepDBSecurityHashInMemoryRepository(),
-        APXDBvCurrencyInMemoryRepository(),
-        APXDBvCustodianInMemoryRepository(),
-        CoreDBRealizedGainLossSupplementaryRepository(),
-    ],
-    prev_bday_cost_repo = LWDBAPXAppraisalPrevBdayRepository(),
-)
-
-# Inject dependencies into the Flask app context
-app.config['lw_transaction_summary_query_handler'] = lw_transaction_summary_query_handler
-
-# Register the blueprint with the app, passing the app's config
-app.register_blueprint(blueprint, config=app.config)
-
 
 if __name__ == '__main__':
     try:
         parser = argparse.ArgumentParser(description='Flask REST API using waitress for WSGI server')
         parser.add_argument('--reset_offset', '-ro', action='store_true', default=False, help='Reset consumer offset to beginning')
         parser.add_argument('--log_level', '-l', type=str.upper, choices=['DEBUG', 'INFO', 'WARN', 'ERROR', 'CRITICAL'], help='Log level')
-        parser.add_argument('--kafka_consumer', '-kc', action='store_true', default=False, help='Activate kafka consumer to update in-memory repos')
+        parser.add_argument('--kafka_consumer', '-kc', action='store_true', default=False, help='Activate kafka consumer to keep in-memory repos updated')
+        parser.add_argument('--use_coredb_sources', '-ucs', action='store_true', default=False, help='Use CoreDB versions of APX procs/funcs, asot querying APX procs/funcs directly')
         args = parser.parse_args()
 
         base_dir = AppConfig().get("logging", "base_dir")
         os.environ['APP_NAME'] = AppConfig().get("app_name", "apx2sftxn_rest_api")
         setup_logging(base_dir=base_dir, log_level_override=args.log_level)
+
+        # Get configs and run flask app
+        host = socket.gethostbyname(socket.gethostname())
+        port = AppConfig().parser.get("rest_api", "port")
+        num_threads = AppConfig().get("rest_api", "num_threads", fallback=1)
+
+        # Initialize command handlers and query handlers
+        lw_transaction_summary_query_handler = LWTransactionSummaryQueryHandler(
+            source_txn_repo = CoreDBTransactionActivityRepository() if args.use_coredb_sources else APXDBTransactionActivityRepository(),
+            preprocessing_supplementary_repos = [
+                APXDBvPortfolioInMemoryRepository(),
+                APXDBvPortfolioBaseInMemoryRepository(),
+                APXDBvPortfolioBaseCustomInMemoryRepository(),
+                APXDBvPortfolioSettingExInMemoryRepository(),
+                APXDBvPortfolioBaseSettingExInMemoryRepository(),
+                APXDBvSecurityInMemoryRepository(), 
+                APXRepDBSecurityHashInMemoryRepository(),
+                APXDBvCurrencyInMemoryRepository(),
+                APXDBvCustodianInMemoryRepository(),
+                # CoreDBRealizedGainLossSupplementaryRepository(),
+                CoreDBRealizedGainLossInMemoryRepository() if args.use_coredb_sources else APXDBRealizedGainLossSupplementaryRepository(),
+            ],
+            prev_bday_cost_repo = LWDBAPXAppraisalPrevBdayRepository(),
+        )
+        lw_apx2sftxn_query_handler = LWAPX2SFTransactionQueryHandler(
+            source_txn_repo = CoreDBTransactionActivityRepository() if args.use_coredb_sources else APXDBTransactionActivityRepository(),
+            preprocessing_supplementary_repos = [
+                APXDBvPortfolioInMemoryRepository(),
+                APXDBvPortfolioBaseInMemoryRepository(),
+                APXDBvPortfolioBaseCustomInMemoryRepository(),
+                APXDBvPortfolioSettingExInMemoryRepository(),
+                APXDBvPortfolioBaseSettingExInMemoryRepository(),
+                APXDBvSecurityInMemoryRepository(), 
+                APXRepDBSecurityHashInMemoryRepository(),
+                APXDBvCurrencyInMemoryRepository(),
+                APXDBvCustodianInMemoryRepository(),
+                # CoreDBRealizedGainLossSupplementaryRepository(),
+                CoreDBRealizedGainLossInMemoryRepository() if args.use_coredb_sources else APXDBRealizedGainLossSupplementaryRepository(),
+                APXRepDBvPortfolioAndStmtGroupCurrencyInMemoryRepository(),
+                CoreDBSFPortfolioLatestInMemoryRepository(),
+            ],
+            prev_bday_cost_repo = LWDBAPXAppraisalPrevBdayRepository(),
+            fx_rate_repo = APXDBvFXRateInMemoryRepository(),
+        )
+
+        # Inject dependencies into the Flask app context
+        app.config['lw_transaction_summary_query_handler'] = lw_transaction_summary_query_handler
+        app.config['lw_apx2sftxn_query_handler'] = lw_apx2sftxn_query_handler
+
+        # Register the blueprint with the app, passing the app's config
+        app.register_blueprint(blueprint, config=app.config)
+
+        # Specify the app's encoder
+        app.json_encoder = CustomJSONEncoder
+
+        # Start using waitress
+        # app.run(host=host, port=port, debug=True)
+        logging.info(f'Starting REST API on {host} port {port} with {num_threads} threads...')
+        serve(app, host=host, port=port, threads=num_threads)
 
         if args.kafka_consumer:
             kafka_consumer = KafkaAPXTransactionMessageConsumer(
@@ -104,16 +143,8 @@ if __name__ == '__main__':
             logging.info(f'Starting kafka consumer....')
             kafka_consumer_thread.start()
 
-        # Get configs and run flask app
-        host = socket.gethostbyname(socket.gethostname())
-        port = AppConfig().parser.get("rest_api", "port")
-        num_threads = AppConfig().get("rest_api", "num_threads", fallback=1)
-
-        # Start using waitress
-        app.run(host=host, port=port, debug=True)
-        serve(app, host=host, port=port, threads=num_threads)
-
-        kafka_consumer_thread.join()
+        if args.kafka_consumer:
+            kafka_consumer_thread.join()
         
     except Exception as e:
         logging.exception(f"{type(e).__name__}: {e}")

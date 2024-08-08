@@ -17,7 +17,7 @@ from domain.python_tools import get_current_callable
 from domain.repositories import HeartbeatRepository, TransactionRepository, TransactionProcessingQueueRepository, SupplementaryRepository
 # from infrastructure.in_memory_repositories import CoreDBRealizedGainLossInMemoryRepository
 from infrastructure.models import MGMTDBHeartbeat, Txn2TableColMap
-from infrastructure.sql_procs import APXDBRealizedGainLossProcAndFunc, APXDBTransactionActivityProcAndFunc
+from infrastructure.sql_procs import APXDBRealizedGainLossProcAndFunc, APXDBTransactionActivityProcAndFunc, APXRepDBGroupMembersFlattenedFunc
 from infrastructure.sql_tables import (
     APXRepDBLWTxnSummaryTable,
     MGMTDBMonitorTable,      
@@ -125,12 +125,14 @@ class LWDBAPXAppraisalPrevBdayRepository(SupplementaryRepository):
             logging.debug(f"Found 0 rows in {self.table.cn} for {prev_bday} {pk_column_values.get('PortfolioCode')} {pk_column_values.get('SecurityID')}!")
             return {}
 
-    def supplement(self, transaction: Transaction):
-        super().supplement(transaction)
+    def supplement(self, transaction: Transaction) -> Union[Dict, None]:
+        supplemental_data = super().supplement(transaction)
 
         # Additionally, update the transaction's per-unit values:
         transaction.LocalCostBasis = transaction.LocalCostPerUnit * transaction.Quantity
         transaction.RptCostBasis = transaction.RptCostPerUnit * transaction.Quantity
+
+        return supplemental_data
 
 
 # TODO: implement below class, or remove
@@ -467,7 +469,7 @@ class APXDBPastDividendRepository_OLD(SupplementaryRepository):
 
         # Look for a FX txn
 
-    def supplement(self, transaction: Transaction):
+    def supplement(self, transaction: Transaction) -> Union[Dict, None]:
         if transaction.TransactionCode != 'dv':
             return
 
@@ -663,7 +665,7 @@ class CoreDBRealizedGainLossSupplementaryRepository(SupplementaryRepository):
             logging.debug(f"Found 0 rows in {self.table.cn} for {pk_column_values}!")
             return {}
 
-    def supplement(self, transaction: Transaction):
+    def supplement(self, transaction: Transaction) -> Union[Dict, None]:
         # Save original quantity (we need to save it back after to avoid it getting overwritten)
         quantity_orig = transaction.Quantity
 
@@ -685,6 +687,13 @@ class CoreDBRealizedGainLossSupplementaryRepository(SupplementaryRepository):
 
         # Save back the original quantity 
         transaction.Quantity = quantity_orig
+
+        return supplemental_data
+
+
+class APXDBRealizedGainLossSupplementaryRepository(CoreDBRealizedGainLossSupplementaryRepository):
+    """ Avoid reusing code from above class, since the only difference is the source is APXDB proc rather than CoreDB table """
+    table = APXDBRealizedGainLossProcAndFunc()
 
 
 class CoreDBRealizedGainLossTransactionRepository(TransactionRepository):
@@ -781,6 +790,7 @@ class CoreDBRealizedGainLossTransactionRepository(TransactionRepository):
 class CoreDBTransactionActivityRepository(TransactionRepository):
     txn_source = COREDBAPXfTransactionActivityTable()
     realized_gains_source = COREDBAPXfRealizedGainLossTable()
+    portfolio_code_expander = APXRepDBGroupMembersFlattenedFunc()
     
     def create(self, transactions: Union[List[Transaction],Transaction]) -> int:
         # May be a Transaction. If so, make it a list:
@@ -850,23 +860,64 @@ class CoreDBTransactionActivityRepository(TransactionRepository):
             return []  # TODO_EH: exception?
 
         # Get source transactions, including historical
-        res_df = self.txn_source.read(portfolio_code=portfolio_code, from_date=historical_from_date, to_date=to_date)
-        transactions = [Transaction(**d) for d in res_df.to_dict('records')]
+        if portfolio_code[0] == '@':
+            # Expand into list of portfolio codes
+            portfolio_codes = self.portfolio_code_expander.get_portfolio_codes(portfolio_code)
+
+            # Query for all - since if we query for the portfolio codes, we may run into parameter length limitation
+            res_df = self.txn_source.read(portfolio_code=None, from_date=historical_from_date, to_date=to_date)
+            logging.info(f'{self.cn} GET finished initial read')  # TODO_CLEANUP: performance logging
+            res_df = res_df.where(pd.notnull(res_df), None)
+
+            # Now filter to the member portfolio codes
+            transactions = [Transaction(**d) for d in res_df.to_dict('records') if d['portfolio_code'] in portfolio_codes]
+            logging.info(f'{self.cn} GET filtered to {len(portfolio_codes)} portfolio codes')  # TODO_CLEANUP: performance logging
+        else:
+            res_df = self.txn_source.read(portfolio_code=portfolio_code, from_date=historical_from_date, to_date=to_date)
+            res_df = res_df.where(pd.notnull(res_df), None)
+            transactions = [Transaction(**d) for d in res_df.to_dict('records')]
         
         # Find dividends with SETTLE date within the specified trade_date range
         dividends = [t for t in transactions 
             # if from_date <= t.SettleDate.date() <= to_date and t.TransactionCode == 'dv']
             if from_date <= t.SettleDate <= to_date and t.TransactionCode == 'dv']
 
-        # Read realized gains proc once (avoids reading it for every dividend separately)
-        realized_gains_df = self.realized_gains_source.read(portfolio_code=portfolio_code, from_date=historical_from_date, to_date=to_date)
+        # Convert to dict where the keys are portfolio_code and values are a list of Transactions
+        transactions_by_portfolio = {}
+        for transaction in transactions:
+            pc = transaction.portfolio_code
+            if pc not in transactions_by_portfolio:
+                transactions_by_portfolio[pc] = []
+            transactions_by_portfolio[pc].append(transaction)
+
+        if len(dividends):
+            # Read realized gains proc once (avoids reading it for every dividend separately)
+            if portfolio_code[0] == '@':
+                # Query for all - since if we query for the portfolio codes, we may run into parameter length limitation
+                res_df = self.realized_gains_source.read(portfolio_code=None, from_date=historical_from_date, to_date=to_date)
+                logging.info(f'{self.cn} GET finished initial read of realized gains')  # TODO_CLEANUP: performance logging
+                
+                # Now filter to the member portfolio codes
+                realized_gains_transactions = [Transaction(**d) for d in res_df.to_dict('records') if d['portfolio_code'] in portfolio_codes]
+                logging.info(f'{self.cn} GET filtered realized gains to {len(portfolio_codes)} portfolio codes')  # TODO_CLEANUP: performance logging
+            else:
+                res_df = self.realized_gains_source.read(portfolio_code=portfolio_code, from_date=historical_from_date, to_date=to_date)
+                realized_gains_transactions = [Transaction(**d) for d in res_df.to_dict('records')]
+
+            # Convert to dict where the keys are portfolio_code and values are a list of Transactions
+            realized_gains_by_portfolio = {}
+            for realized_gains_txn in realized_gains_transactions:
+                pc = realized_gains_txn.portfolio_code
+                if pc not in realized_gains_by_portfolio:
+                    realized_gains_by_portfolio[pc] = []
+                realized_gains_by_portfolio[pc].append(realized_gains_txn)
 
         for dv in dividends:
             # APXTxns.pm line 353: jam on the LW blinders:  dv are all about SettleDate
             dv.TradeDate = dv.SettleDate
 
             # APXTxns.pm line 453-464: Find a wd matching the settle date, security (i.e. divacc), and having very similar amount
-            wd_candidates = [t for t in transactions if t.TransactionCode in ('wd', 'dp')] 
+            wd_candidates = [t for t in transactions_by_portfolio[dv.portfolio_code] if t.TransactionCode in ('wd', 'dp')]
             wd_candidates = [t for t in wd_candidates if t.SettleDate == dv.SettleDate]
             wd_candidates = [t for t in wd_candidates if t.SecurityID1 == dv.SecurityID2]
             wd_candidates = [t for t in wd_candidates if abs(t.TradeAmountLocal - dv.TradeAmountLocal) < 0.015]  # APXTxns.pm line 11
@@ -879,7 +930,7 @@ class CoreDBTransactionActivityRepository(TransactionRepository):
                 dv.add_lineage(f'{dv.TransactionCode} -> Merged dp/wd {wd.PortfolioTransactionID}... but did not remove the wd... see APXTxns.pm line 462', source_callable=get_current_callable())
 
             # APXTxns.pm line 465-519: Find a sl from cash to cash, and having very similar amount
-            sl_candidates = [t for t in transactions if t.TransactionCode == 'sl']
+            sl_candidates = [t for t in transactions_by_portfolio[dv.portfolio_code] if t.TransactionCode == 'sl']
             sl_candidates = [t for t in sl_candidates if t.SettleDate == dv.SettleDate]
             sl_candidates = [t for t in sl_candidates if t.SecTypeCode1 == 'ca']
             sl_candidates = [t for t in sl_candidates if t.SecTypeCode2 == 'ca']
@@ -889,7 +940,8 @@ class CoreDBTransactionActivityRepository(TransactionRepository):
                 sl = sl_candidates[0]
 
                 # Remove this one from the transactions, since it has been "merged" into the dividend
-                transactions = [t for t in transactions if t != sl]
+                # transactions = [t for t in transactions if t != sl]
+                transactions_by_portfolio[dv.portfolio_code] = [t for t in transactions_by_portfolio[dv.portfolio_code] if t != sl]
                 dv.add_lineage(f'{dv.TransactionCode} -> Merged sl {sl.PortfolioTransactionID}', source_callable=get_current_callable())
 
                 # update the 'dv' txn row to consolidate in the FX (line 468-476)
@@ -900,18 +952,22 @@ class CoreDBTransactionActivityRepository(TransactionRepository):
                     # TODO_EH: possible that the attribute DNE?
 
                 # line 484-518: combine the gains 
-                # Need to find realized gains first:                
-                realized_gains_transactions = [Transaction(**d) for d in realized_gains_df.to_dict('records') if d['PortfolioTransactionID'] == sl.PortfolioTransactionID]
-                if len(realized_gains_transactions):
-                    # If we reached here, there is a relevant "realized gain" to combine with:
-                    realized_gains_transaction = realized_gains_transactions[0]
-                    if hasattr(dv, 'RealizedGainLoss'):
-                        if dv.RealizedGainLoss is not None:
-                            dv.RealizedGainLoss += realized_gains_transaction.RealizedGainLoss
+                # Need to find realized gains first:             
+                if dv.portfolio_code in realized_gains_by_portfolio:
+                    realized_gains_transactions = [t for t in realized_gains_by_portfolio[dv.portfolio_code] if t.PortfolioTransactionID == sl.PortfolioTransactionID]
+                    if len(realized_gains_transactions):
+                        # If we reached here, there is a relevant "realized gain" to combine with:
+                        realized_gains_transaction = realized_gains_transactions[0]
+                        dv.add_lineage(f'{dv.TransactionCode} -> Added RealizedGainLoss {realized_gains_transaction.RealizedGainLoss}', source_callable=get_current_callable())
+                        if hasattr(dv, 'RealizedGainLoss'):
+                            if dv.RealizedGainLoss is not None:
+                                dv.RealizedGainLoss += realized_gains_transaction.RealizedGainLoss
+                            else:
+                                dv.RealizedGainLoss = realized_gains_transaction.RealizedGainLoss
                         else:
                             dv.RealizedGainLoss = realized_gains_transaction.RealizedGainLoss
-                    else:
-                        dv.RealizedGainLoss = realized_gains_transaction.RealizedGainLoss
+
+        logging.info(f'{self.cn} GET found matches for dividends')  # TODO_CLEANUP: performance logging
 
         # Finally, we have:
         # transactions: excludes any sl/wd which have been "merged" into dividends above.
@@ -920,6 +976,8 @@ class CoreDBTransactionActivityRepository(TransactionRepository):
         # Combine these two, then return the combined result
         res_transactions = [t for t in transactions
             if from_date <= t.TradeDate <= to_date and t.TransactionCode != 'dv']
+        res_transactions = [t for transactions in transactions_by_portfolio.values() for t in transactions
+                                if from_date <= t.TradeDate <= to_date and t.TransactionCode != 'dv']
         res_transactions.extend(dividends)
 
         # Order by PortfolioTransactionID and return
@@ -1279,7 +1337,7 @@ class COREDBSFTransactionRepository(TransactionRepository):
         Txn2TableColMap('RealizedGain'     , 'realized_gain_port__c'
                             , lambda x: x if not x else normal_round(x, 2)),
         Txn2TableColMap('Commission'       , 'commission__c'
-                            , lambda x: x if not x else normal_round(x, 2)),
+                            , lambda x: 0 if not x else normal_round(x, 2)),
         Txn2TableColMap('DataHandle'       , 'data_handle'),
         Txn2TableColMap('LocalTranKey'     , 'lw_tran_id__c'),
         Txn2TableColMap('WarnCode'         , 'warn_code'
@@ -1297,13 +1355,17 @@ class COREDBSFTransactionRepository(TransactionRepository):
         # Loop thru; produce list of dicts. Each will have keys matching table column names
         table_ready_dicts = []
         delete_stmts = []
+        data_dates = []
         now = datetime.datetime.now()
+        old_row_count = self.table.row_count()
+        logging.debug(f'{self.cn} got row count {old_row_count}')
         common_dict = {
             'gendate': now,
             'moddate': now,
             'genuser': (f"{os.getlogin()}_{os.environ.get('APP_NAME') or os.path.basename(__file__)}")[:32],
             'moduser': (f"{os.getlogin()}_{os.environ.get('APP_NAME') or os.path.basename(__file__)}")[:32],
-            'computer': socket.gethostname().upper()
+            'computer': socket.gethostname().upper(),
+            'scenario': self.table.base_scenario,
         }
         for txn in transactions:
             table_ready_dict = common_dict.copy()
@@ -1330,20 +1392,38 @@ class COREDBSFTransactionRepository(TransactionRepository):
             # Now we have the dict containing all desired values for the row. Append it:
             table_ready_dicts.append(table_ready_dict)
 
+            # Append data_date, if it's not already there:
+            if old_row_count:
+                trade_date_original = (txn.trade_date_original 
+                    if isinstance(txn.trade_date_original, (datetime.datetime, datetime.date)) else datetime.datetime.strptime(txn.trade_date_original, '%Y-%m-%d').date()
+                )
+                if trade_date_original not in data_dates:
+                    logging.info(f'Will need to rotate out for scenario: {type(trade_date_original)} {trade_date_original}')
+                    data_dates.append(trade_date_original)
+
             # Also create & append delete stmt, if it's not already there:
-            delete_stmt = sql.delete(self.table.table_def)
-            delete_stmt = delete_stmt.where(self.table.c.portfolio_code == txn.portfolio_code)
-            delete_stmt = delete_stmt.where(self.table.c.trade_date_original == txn.trade_date_original)
-            if delete_stmt not in delete_stmts:
-                delete_stmts.append(delete_stmt)
+            if old_row_count and 1==2:  # TODO_CLEANUP: delete once confirmed going with scenario rotation rather than delete
+                delete_stmt = sql.delete(self.table.table_def)
+                delete_stmt = delete_stmt.where(self.table.c.portfolio_code == txn.portfolio_code)
+                delete_stmt = delete_stmt.where(self.table.c.trade_date_original == txn.trade_date_original)
+                if delete_stmt not in delete_stmts:
+                    delete_stmts.append(delete_stmt)
 
         # Now we have a list of dicts. Convert to df to facilitate bulk insert: 
         df = pd.DataFrame(table_ready_dicts)
 
         # Delete old results
-        for stmt in delete_stmts:
-            logging.debug(f'Deleting old results from {self.table.cn}... {str(stmt)}')
-            delete_res = self.table.execute_write(stmt)
+        if old_row_count and 1==2:  # TODO_CLEANUP: delete once confirmed going with scenario rotation rather than delete
+            logging.info(f'Deleting old results from {self.table.cn}...')
+            for stmt in delete_stmts:
+                logging.debug(f'Deleting old results from {self.table.cn}... {str(stmt)}')
+                delete_res = self.table.execute_write(stmt)
+        elif old_row_count:
+            for d in data_dates:
+                logging.info(f'Rotating scenario for data_dt={d}')
+                self.table.rotate(data_date=d)
+        else:
+            logging.info(f'Skipping delete/rotation in {self.cn} because there are 0 existing rows!')
 
         # Bulk insert df
         logging.info(f'Inserting {len(df)} new results to {self.table.cn}...')

@@ -92,6 +92,7 @@ def main():
     tolerances = {
         'fx_rate': 0.000051,  # Perl is inconsistent in number of rounding places (sometimes 4, sometimes 9? Not sure)
         'commission': 0.005,  # Perl is inconsistent in number of rounding places (2 places only for intl equities? Not sure)
+        'commission__c': 0.005,  # Perl is inconsistent in number of rounding places (2 places only for intl equities? Not sure)
         'trade_amt_firm__c': 0.011,  # Penny diffs in non-CAD portfolios - not sure why... TODO_ROUNDING: figure this out, ideally?
         'cash_flow_firm__c': 0.011,  # Penny diffs in non-CAD portfolios - not sure why... TODO_ROUNDING: figure this out, ideally?
         'quantity__c': 0.011,  # Penny diffs if quantity is x.xx5 ... could be from inconsistent perl rounding: https://stackoverflow.com/a/41318772 TODO_ROUNDING: figure this out?
@@ -218,8 +219,8 @@ def main():
 
         print(f'{datetime.datetime.now()}: Saved {len(res_transactions)} to {target_txn_repo.cn}')
 
-    # else:
-    #     engines = []
+    else:
+        engines = []
 
     for pc in args.portfolio_code:
         result = None

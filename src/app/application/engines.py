@@ -121,7 +121,7 @@ class LWTransactionSummaryEngine(TransactionProcessingEngine):
             txn.trade_date_original = txn.TradeDate  # Since for dividends, we may change the TradeDate later
             for sr in self.preprocessing_supplementary_repos:
                 if supplemental_data := sr.supplement(txn):
-                    column_mappings_str = [f'{cm.supplementary_column_name}={getattr(txn, cm.transaction_column_name)}' 
+                    column_mappings_str = [f'{cm.supplementary_column_name}={getattr(txn, cm.transaction_column_name, None)}' 
                                                 for cm in sr.pk_columns]
                     txn.add_lineage(f"Supplemented by {sr.cn}, based on ({', '.join(column_mappings_str)})"
                                         , source_callable=get_current_callable())

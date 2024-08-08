@@ -53,6 +53,9 @@ class SupplementaryRepository(ABC):
     def get(self, pk_column_values: Dict[str, Any]) -> dict:
         pass
 
+    def pre_supplement(self, portfolio_code: Union[str,None]=None, trade_date: Union[datetime.date, Tuple[datetime.date, datetime.date], None]=None):
+        """ Subclasses should implement this if any prep is needed before supplementing """
+
     def supplement(self, transaction: Transaction) -> Union[Dict, None]:
         """ Default behaviour to supplement a transaction. Subclasses should override for other desired behaviour """
         

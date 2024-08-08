@@ -161,3 +161,49 @@ class APXDBTransactionActivityProcAndFunc(BaseStoredProc):
 
 	def __str__(self):
 		return f'{self.config_section}-fTransactionActivity'
+
+
+class APXRepDBGroupMembersFlattenedFunc(BaseStoredProc):
+	config_section = 'apxrepdb'
+	
+	def read(self, Portfolios):
+		"""
+		Execute stored function with specified criteria
+
+		:return: DataFrame
+		"""
+
+		with get_pyodbc_conn(self.config_section) as conn:
+			conn.autocommit = True
+
+			# Base query
+			query = f"""
+
+				SELECT 	*
+				FROM 	[dbo].[fLwPortfolioGroupMemberFlattened]('{Portfolios}')
+				
+			"""
+
+			# Wrap in APX session procs
+			query = wrap_in_session_procs(query)
+
+			results = execute_multi_query(conn, query)
+			
+			conn.close()
+
+			return results[0]
+
+	def get_portfolio_codes(self, portfolio_code: str):
+		if portfolio_code[0] == '@':
+			members_df = self.read(Portfolios=portfolio_code)
+			portfolio_codes = members_df['MemberCode'].values.tolist()
+			return portfolio_codes
+		else:
+			return [portfolio_code]
+
+	def __str__(self):
+		return f'{self.config_section}-fLwPortfolioGroupMemberFlattened'
+		
+
+
+

@@ -21,11 +21,17 @@ from domain.repositories import TransactionRepository, SupplementaryRepository
 # globals
 TINY = 0.000001  # APXTxns.pm line 10, apx2txnrpts.pl line 87  # TODO: move somewhere else?
 
+
 @dataclass
 class TransactionQueryHandler(ABC):
     """ Default base class for custom transaction queries """
     source_txn_repo: TransactionRepository  # We'll initially pull the transactions from here
     preprocessing_supplementary_repos: List[SupplementaryRepository]  # We'll supplement with data from these
+
+    def pre_supplement(self, portfolio_code: Union[str,None]=None, trade_date: Union[datetime.date, Tuple[datetime.date, datetime.date], None]=None):
+        for sr in self.preprocessing_supplementary_repos:
+            logging.info(f'Pre-supplementing for {sr.cn}')  # TODO_CLEANUP: performance logging
+            sr.pre_supplement(portfolio_code, trade_date)
 
     def preprocessing_supplement(self, transactions: List[Transaction]):
         """ Default supplementing behaviour """
@@ -35,14 +41,22 @@ class TransactionQueryHandler(ABC):
             for txn in transactions:
                 txn.trade_date_original = txn.TradeDate  # Since for dividends, we may change the TradeDate later
                 if supplemental_data := sr.supplement(txn):
-                    column_mappings_str = [f'{cm.supplementary_column_name}={getattr(txn, cm.transaction_column_name)}' 
-                                                for cm in sr.pk_columns]
-                    txn.add_lineage(f"Supplemented by {sr.cn}, based on ({', '.join(column_mappings_str)})"
-                                    , source_callable=get_current_callable())
+                    try:
+                        column_mappings_str = [f'{cm.supplementary_column_name}={getattr(txn, cm.transaction_column_name, None)}' 
+                                                    for cm in sr.pk_columns]
+                        txn.add_lineage(f"Supplemented by {sr.cn}, based on ({', '.join(column_mappings_str)})"
+                                        , source_callable=get_current_callable())
+                    except Exception as e:
+                        logging.exception(e)  # TODO: why does this throw exception: File "C:\lw\python_venv\311-apx2sftxn\apx2sftxn\src\app\application\query_handlers.py", line 44, in <listcomp>
+    # column_mappings_str = [f'{cm.supplementary_column_name}={getattr(txn, cm.transaction_column_name, None)}'
+                                                            # ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+# AttributeError: 'Transaction' object has no attribute 'SecurityID'
 
     def handle(self, portfolio_code: Union[str,None]=None, trade_date: Union[datetime.date, Tuple[datetime.date, datetime.date], None]=None) -> List[Transaction]:
         source_txns = self.source_txn_repo.get(portfolio_code, trade_date)
         logging.info(f'{self.cn} got {len(source_txns)} from {self.source_txn_repo.cn}')
+        self.pre_supplement(portfolio_code, trade_date)
+        logging.info(f'{self.cn} done pre-supplementing for {portfolio_code}, {trade_date}')  # TODO_CLEANUP: performance logging
         self.preprocessing_supplement(source_txns)
         logging.info(f'{self.cn} supplemented with {len(self.preprocessing_supplementary_repos)} repos')  # TODO_CLEANUP: performance logging
         return self.process(starting_transactions=source_txns)
@@ -694,6 +708,9 @@ class LWTransactionSummaryQueryHandler(TransactionQueryHandler):
         for i, txn in enumerate(transactions):
 
             try:
+                if not i % 1000:
+                    logging.info(f'{self.cn} done processing {i-1} of {len(transactions)} transactions...')
+
                 # 0a. Add standard attributes
                 self.assign_standard_attributes(txn)
 
@@ -749,6 +766,7 @@ class LWTransactionSummaryQueryHandler(TransactionQueryHandler):
                     raise TransactionShouldBeRemovedException(txn)
 
                 # APXTxns.pm line 963
+                # logging.info(txn)  # TODO_CLEANUP: debug 20240726
                 if txn.TransactionCode in ('dr', 'dv') and txn.SecTypeBaseCode2 == 'aw' and txn.SecurityID2 is None:
                     raise TransactionShouldBeRemovedException(txn)
 
@@ -791,6 +809,9 @@ class LWTransactionSummaryQueryHandler(TransactionQueryHandler):
                 new_txns.append(e.txn)
             except TransactionShouldBeRemovedException as e:
                 indices_to_remove.append(i)
+            except Exception as e:
+                logging.error(f'Exception from the following Transaction: {txn}')
+                logging.error(e)
 
         # 100a. Remove transactions which were identified to remove
         for i in reversed(indices_to_remove):
@@ -836,4 +857,88 @@ class LWTransactionSummaryQueryHandler(TransactionQueryHandler):
         return transactions
 
 
+@dataclass
+class LWAPX2SFTransactionQueryHandler(LWTransactionSummaryQueryHandler):
+    """ Generate txns for sending to SF. See http://lwweb/wiki/bin/view/Systems/ApxSmes/APXToSFTXN """
+    fx_rate_repo: SupplementaryRepository  # We'll use this to get the portf2firm currency FX rate (if different)
+
+    def get_portfolio2firm_fx_rate(self, txn: Transaction):
+        # If CAD portfolio, return 1.0 - no need to query
+        if txn.ReportingCurrencyCode == 'ca':
+            return 1.0
+
+        # Query provided repo for these values
+        pk_column_values = {
+            'PriceDate'                 : txn.TradeDate,
+            'NumeratorCurrencyCode'     : 'ca',  # Because it's the firm currency (CAD)
+            'DenominatorCurrencyCode'   : txn.ReportingCurrencyCode,
+        }   
+        get_res = self.fx_rate_repo.get(pk_column_values=pk_column_values)
+
+        return get_res.get('SpotRate')
+
+    def assign_tradedate_settledate_dt(self, txn: Transaction):
+        # apx2sf.pl line 2788-2793
+        txn.TradeDateDT = txn.TradeDate
+        txn.SettleDateDT = txn.SettleDate
+
+    def assign_cash_flow_local(self, txn: Transaction):
+        # apx2sf.pl line 2857-2865
+        if trade_amount_local := getattr(txn, 'TradeAmountLocal', None):
+            if txn.TransactionCode in ('by'):
+                txn.CashFlowLocal = -1.0 * trade_amount_local
+            else:
+                txn.CashFlowLocal = trade_amount_local
+
+    def assign_trade_amt_cash_flow_firm_ccy(self, txn: Transaction, portfolio2firm_fx_rate: dict):
+        # apx2sf.pl line 2916-2944: Assign TradeAmount & CashFlow in firm ccy
+        for attr in ('TradeAmount', 'CashFlow'):
+            if portf_ccy_attr_val := getattr(txn, attr, None):
+                firm_ccy_val = portf_ccy_attr_val * portfolio2firm_fx_rate[txn.portfolio_code]
+                setattr(txn, f'{attr}Firm', firm_ccy_val)
+                txn.add_lineage(f"Assigned {attr}Firm as {portf_ccy_attr_val} * {portfolio2firm_fx_rate[txn.portfolio_code]} = {firm_ccy_val}", source_callable=get_current_callable())
+
+
+    def process(self, starting_transactions: List[Transaction]) -> List[Transaction]:
+        transactions = super().process(starting_transactions)  # most of the logic is taken care of by LW Txn Summary logic
+
+        # Below is SF-specific processing: 
+        
+        # We'll read FX rate once per portfolio rather than for every txn, for performance:
+        portfolio2firm_fx_rate = {}
+
+        # Loop through transactions
+        for txn in transactions:
+            if txn.portfolio_code not in portfolio2firm_fx_rate:
+                portfolio2firm_fx_rate[txn.portfolio_code] = self.get_portfolio2firm_fx_rate(txn)
+
+            self.assign_tradedate_settledate_dt(txn)
+
+            # apx2sf.pl line 2803-2856: # not needed as this is already done by LWTransactionSummaryEngine
+            # see null_fields_for_dv, reverse_amount_signs, assign_name4stmt_for_client_wd_dp, unassign_gains_proceeds_quantity_if_zero, assign_cash_flow
+
+            self.assign_cash_flow_local(txn)
+
+            # apx2sf.pl line 2876-2881: Check for APX vs SF mismatch in portfolio currency
+            if (apx_portf_ccy_iso := getattr(txn, 'PortfolioISOCode', None)) and (sf_portf_ccy_iso := getattr(txn, 'PortfolioCurrencyISOCode', None)):
+                if apx_portf_ccy_iso != sf_portf_ccy_iso:
+                    warn_msg = f'{txn.PortfolioCode} ({apx_portf_ccy_iso}): APX vs SF MISMATCH on portfolio reporting currency, using SF ({sf_portf_ccy_iso})'
+                    logging.error(warn_msg)
+                    txn.WarnCode = 1
+                    txn.Warning = warn_msg
+                    # TODO_EH: further error handling here? 
+
+            # apx2sf.pl line 2892-2897: Check for APX vs SF mismatch in stmt group currency
+            if (apx_group_ccy_iso := getattr(txn, 'PortfolioGroupISOCode', None)) and (sf_group_ccy_iso := getattr(txn, 'StatementGroupCurrencyISOCode', None)):
+                if apx_group_ccy_iso != sf_group_ccy_iso:
+                    warn_msg = f'{txn.PortfolioCode} ({apx_group_ccy_iso}): APX vs SF MISMATCH on stmt group reporting currency, using SF ({sf_group_ccy_iso})'
+                    logging.error(warn_msg)
+                    txn.WarnCode = 1
+                    txn.Warning = warn_msg
+                    # TODO_EH: further error handling here? 
+
+            self.assign_trade_amt_cash_flow_firm_ccy(txn, portfolio2firm_fx_rate)
+
+        # Now we have processed the transactions. Return them:
+        return transactions
 

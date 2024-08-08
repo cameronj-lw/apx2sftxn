@@ -2,6 +2,7 @@
 # core python
 from abc import ABC
 from dataclasses import dataclass, field
+import datetime
 import logging
 from typing import Any, Dict, List, Tuple, Type, Union
 
@@ -59,7 +60,7 @@ class InMemorySingletonSQLRepository(InMemoryRepository):
             cls._instance = super(InMemorySingletonSQLRepository, cls).__new__(cls)
         return cls._instance
 
-    def __init__(self, pk_columns=None, sql_source=None, portfolio_code_columns=None, trade_date_columns=None, relevant_columns=None):
+    def __init__(self, pk_columns=None, sql_source=None, portfolio_code_columns=None, trade_date_columns=None, relevant_columns=None, initialize_from_sql=True):
         if self._initialized:
             return
         self._initialized = True
@@ -71,10 +72,10 @@ class InMemorySingletonSQLRepository(InMemoryRepository):
         self.relevant_columns = relevant_columns if relevant_columns else []
         self.current_data = {}
 
-        if self.sql_source:
+        if self.sql_source and initialize_from_sql:
             logging.info(f'Initializing {self.__class__.__name__} with data from {self.sql_source.__name__}')
-        self.refresh()
-
+            self.refresh()
+        
     def refresh(self, params: Dict = {}):
         """ Refresh in-memory data for provided criteria """
         if not self.sql_source:
@@ -108,7 +109,7 @@ class APXRepDBSecurityHashInMemoryRepository(InMemorySingletonSQLRepository):
         super().__init__(pk_columns=[PKColumnMapping('SecurityID')], sql_source=APXRepDBpAPXReadSecurityHashProc
                             , relevant_columns=['Name4Stmt', 'Name4Trading'])
 
-    def supplement(self, transaction: Transaction):
+    def supplement(self, transaction: Transaction) -> Union[Dict, None]:
         for suffix in ('1', '2'):                
             # Get PK column values
             pk_column_values = {'SecurityID': getattr(transaction, f'SecurityID{suffix}')}
@@ -116,9 +117,12 @@ class APXRepDBSecurityHashInMemoryRepository(InMemorySingletonSQLRepository):
             # Now we have a dict containing all desired filtering criteria. Get with that criteria:
             supplemental_data = self.get(pk_column_values=pk_column_values)
 
-            # Update the transaction
-            for key, value in supplemental_data.items():
-                setattr(transaction, f'{key}{suffix}', value)
+            if isinstance(supplemental_data, dict):
+                # Update the transaction
+                for key, value in supplemental_data.items():
+                    setattr(transaction, f'{key}{suffix}', value)
+
+        return supplemental_data
 
 class APXDBvPortfolioInMemoryRepository(InMemorySingletonSQLRepository):    
     def __init__(self):
@@ -151,7 +155,7 @@ class APXDBvCurrencyInMemoryRepository(InMemorySingletonSQLRepository):
         super().__init__(pk_columns=[PKColumnMapping('FXNumeratorCurrencyCode', 'CurrencyCode')], sql_source=APXDBvCurrencyView
                             , relevant_columns=['ISOCode'])
 
-    def supplement(self, transaction: Transaction):
+    def supplement(self, transaction: Transaction) -> Union[Dict, None]:
         if hasattr(transaction, 'FXNumeratorCurrencyCode'):
             # Don't do the superclass supplement unless the required txn attribute exists
             # TODO: better way to avoid the error when using this class as part of APX2SFTxn engine?
@@ -179,12 +183,11 @@ class APXDBvCurrencyInMemoryRepository(InMemorySingletonSQLRepository):
 
 class APXDBvSecurityInMemoryRepository(InMemorySingletonSQLRepository):
     def __init__(self):
-        # The instance shall not have pk_columns, since we implement our own "Supplement" in order to supplement both Security1 and Security2 of the txn
         super().__init__(pk_columns=[PKColumnMapping('SecurityID')], sql_source=APXDBvSecurityView
                             , relevant_columns=['ProprietarySymbol', 'PrincipalCurrencyCode', 'FullName', 'Symbol', 'SecTypeBaseCode'
                                                 , 'CouponDelayDays', 'MaturityDate', ])  
         
-    def supplement(self, transaction: Transaction):
+    def supplement(self, transaction: Transaction) -> Union[Dict, None]:
         for suffix in ('1', '2'):                
             # Get PK column values
             pk_column_values = {'SecurityID': getattr(transaction, f'SecurityID{suffix}')}
@@ -192,15 +195,18 @@ class APXDBvSecurityInMemoryRepository(InMemorySingletonSQLRepository):
             # Now we have a dict containing all desired filtering criteria. Get with that criteria:
             supplemental_data = self.get(pk_column_values=pk_column_values)
 
-            # Update the transaction
-            for key, value in supplemental_data.items():
-                setattr(transaction, f'{key}{suffix}', value)
+            if isinstance(supplemental_data, dict):
+                # Update the transaction
+                for key, value in supplemental_data.items():
+                    setattr(transaction, f'{key}{suffix}', value)
 
-            # For CouponDelayDays: 253 is the APX internal value for "use Sec Type". 
-            # If we find this value is 253, set a separate attribute of the transaction.
-            # This would allow application layer logic to use it, without infrastructure layer bleeding into application layer.
-            if supplemental_data['CouponDelayDays'] == 253:
-                setattr(transaction, f'UseSecTypeForCouponDelayDays{suffix}', True)
+                # For CouponDelayDays: 253 is the APX internal value for "use Sec Type". 
+                # If we find this value is 253, set a separate attribute of the transaction.
+                # This would allow application layer logic to use it, without infrastructure layer bleeding into application layer.
+                if supplemental_data['CouponDelayDays'] == 253:
+                    setattr(transaction, f'UseSecTypeForCouponDelayDays{suffix}', True)
+
+        return supplemental_data
 
 class APXDBvFXRateInMemoryRepository(InMemorySingletonSQLRepository):
     def __init__(self):
@@ -234,11 +240,13 @@ class APXDBvCustodianInMemoryRepository(InMemorySingletonSQLRepository):
         super().__init__(pk_columns=[PKColumnMapping('CustodianID')], sql_source=APXDBvCustodianView
                             , relevant_columns=['CustodianName'])
 
-    def supplement(self, transaction: Transaction):
+    def supplement(self, transaction: Transaction) -> Union[Dict, None]:
         # Combine the CustodianID into the name (APXTxns.pm line 984)
-        super().supplement(transaction)
+        supplemental_data = super().supplement(transaction)
         if transaction.CustodianName:
             transaction.CustodianName = f"{transaction.CustodianName} ({int(transaction.CustodianID)})"
+
+        return supplemental_data
 
 class APXRepDBvStmtGroupByPortfolioInMemoryRepository(InMemorySingletonSQLRepository):
     def __init__(self):
@@ -256,33 +264,49 @@ class CoreDBSFPortfolioLatestInMemoryRepository(InMemorySingletonSQLRepository):
         super().__init__(pk_columns=[PKColumnMapping('PortfolioCode', 'LW_Portfolio_ID__c')], sql_source=CoreDBSFPortfolioLatestView
                             , relevant_columns=['PortfolioCurrencyISOCode', 'StatementGroupCurrencyISOCode', 'Id'])
 
-    def supplement(self, transaction: Transaction):
+    def supplement(self, transaction: Transaction) -> Union[Dict, None]:
         # Also assign the SF Portfolio ID
         supplemental_data = super().supplement(transaction)
         if supplemental_data:
             if sf_portfolio_id := supplemental_data.get('Id'):
                 transaction.SfPortfolioID = sf_portfolio_id
 
+        return supplemental_data
+
 
 class CoreDBRealizedGainLossInMemoryRepository(InMemorySingletonSQLRepository):
-    # TODO_CLEANUP: delete this class (not used)
+    # TODO_CLEANUP: delete this class, if not used
     def __init__(self):
         super().__init__(pk_columns=[
                                     PKColumnMapping('PortfolioTransactionID'), 
                                     PKColumnMapping('TranID'), 
                                     PKColumnMapping('LotNumber'), 
                                 ], sql_source=COREDBAPXfRealizedGainLossTable
-                            , relevant_columns=['RealizedGainLoss', 'RealizedGainLossLocal', 'CostBasis', 'CostBasisLocal', 'Quantity'])
+                            , relevant_columns=['RealizedGainLoss', 'RealizedGainLossLocal', 'CostBasis', 'CostBasisLocal', 'Quantity']
+                            , initialize_from_sql=False)
     
-    def supplement(self, transaction: Transaction):
+    def pre_supplement(self, portfolio_code: Union[str,None]=None, trade_date: Union[datetime.date, Tuple[datetime.date, datetime.date], None]=None):
+        # Infer from date & to date from trade_date
+        if isinstance(trade_date, tuple):
+            from_date, to_date = trade_date
+        elif isinstance(trade_date, datetime.date):
+            from_date = to_date = trade_date
+        elif trade_date:
+            logging.error(f'{type(trade_date).__name__}: invalid arg for {self.cn} GET trade_date: {trade_date}')
+        else:
+            from_date = to_date = None
+
+        # Refresh for specified portfolio_code and from/to dates
+        self.refresh(params={'portfolio_code': portfolio_code, 'from_date': from_date, 'to_date': to_date})
+
+    def supplement(self, transaction: Transaction) -> Union[Dict, None]:
         # Save original quantity (we need to save it back after to avoid it getting overwritten)
         quantity_orig = transaction.Quantity
 
         # Supplement as normal
-        super().supplement(transaction)
+        supplemental_data = super().supplement(transaction)
 
         # We need to check if there is a quantity in the supplemental data, and if so, then supplement further:
-        supplemental_data = self._get_supplemental_data(transaction)
         if isinstance(supplemental_data, dict):
             if supplemental_quantity := supplemental_data.get('Quantity'):
                 if hasattr(transaction, 'CostBasis'):
@@ -297,7 +321,8 @@ class CoreDBRealizedGainLossInMemoryRepository(InMemorySingletonSQLRepository):
         # Save back the original quantity 
         transaction.Quantity = quantity_orig
 
-
+        # Return supplemental data
+        return supplemental_data
 
 
 class APXDBFXRatesByPortfolioAndTradeDateRepository(InMemoryRepository):
