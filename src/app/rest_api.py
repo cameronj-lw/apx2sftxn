@@ -4,9 +4,11 @@ import argparse
 from configparser import ConfigParser
 import logging
 import os
+import psutil
 import socket
 import sys
 import threading
+import time
 
 # pypi
 from flask import Flask
@@ -58,6 +60,22 @@ def teardown(exception):
         logging.info(f'Received shutdown request. Exiting...')
         os._exit(0)
 
+def monitor_memory(threshold, sleep_secs=1):
+    process = psutil.Process(os.getpid())
+    while True:
+        mem_info = process.memory_info()
+        if mem_info.rss > threshold:
+            # Trigger alert, e.g., send an email
+            logging.error(f"Memory usage of {threshold / 1024.0 / 1024.0} MB exceeded: {mem_info.rss / 1024.0 / 1024.0} MB! Forcing shutdown...")
+            # Optionally, shut down the process or take other action
+            os._exit(1)  # sys.exit(1)  # or handle more gracefully
+        time.sleep(sleep_secs)
+
+def start_monitoring(threshold, sleep_secs):
+    thread = threading.Thread(target=monitor_memory, args=(threshold, sleep_secs))
+    thread.daemon = True
+    thread.start()
+
 
 if __name__ == '__main__':
     try:
@@ -66,6 +84,9 @@ if __name__ == '__main__':
         parser.add_argument('--log_level', '-l', type=str.upper, choices=['DEBUG', 'INFO', 'WARN', 'ERROR', 'CRITICAL'], help='Log level')
         parser.add_argument('--kafka_consumer', '-kc', action='store_true', default=False, help='Activate kafka consumer to keep in-memory repos updated')
         # parser.add_argument('--use_coredb_sources', '-ucs', action='store_true', default=False, help='Use CoreDB versions of APX procs/funcs, asot querying APX procs/funcs directly')
+        parser.add_argument('--max_megabytes', '-mm', type=int, help='How many MB to allow before shutting down. If not provided, default to config.ini')
+        parser.add_argument('--monitor_memory_sleep_secs', '-mmss', type=int, help='How many seconds to wait between checking memory usage. If not provided, default to config.ini')
+    
         args = parser.parse_args()
 
         base_dir = AppConfig().get("logging", "base_dir")
@@ -76,6 +97,13 @@ if __name__ == '__main__':
         host = socket.gethostbyname(socket.gethostname())
         port = AppConfig().parser.get("rest_api", "port")
         num_threads = AppConfig().get("rest_api", "num_threads", fallback=1)
+
+        # Begin monitoring memory usage
+        max_mb = args.max_megabytes or int(AppConfig().get("rest_api", "max_mb", fallback=None))
+        if max_mb:
+            mm_sleep_secs = args.monitor_memory_sleep_secs or int(AppConfig().get("rest_api", "monitor_memory_sleep_secs", fallback=1))
+            logging.info(f'Will monitor memory usage every {mm_sleep_secs} seconds and shutdown if reaching {max_mb} MB')
+            start_monitoring(threshold = max_mb * 1024 * 1024, sleep_secs=mm_sleep_secs)
 
         # Initialize command handlers and query handlers
         lw_transaction_summary_query_handler = LWTransactionSummaryQueryHandler(
