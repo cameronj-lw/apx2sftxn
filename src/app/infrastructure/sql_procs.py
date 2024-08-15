@@ -157,6 +157,10 @@ class APXDBTransactionActivityProcAndFunc(BaseStoredProc):
 			
 			conn.close()
 
+			# Some columns are datetime, when they actually "should" be a date ... fix this:
+			for col in ('OriginalCostDate', 'SettleDate', 'SettledByDate', 'ThruDate', 'TradeDate'):
+				results[0][col] = pd.to_datetime(results[0][col]).dt.date
+
 			return results[0]
 
 	def __str__(self):

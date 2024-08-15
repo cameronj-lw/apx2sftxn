@@ -9,12 +9,15 @@ from typing import Any, Dict, List, Tuple, Type, Union
 # native
 from domain.models import PKColumnMapping, Transaction
 from domain.repositories import SupplementaryRepository
-from infrastructure.sql_procs import APXRepDBpAPXReadSecurityHashProc
+from infrastructure.sql_procs import (
+    APXRepDBpAPXReadSecurityHashProc, APXRepDBGroupMembersFlattenedFunc,
+    APXDBRealizedGainLossProcAndFunc,
+)
 from infrastructure.sql_tables import (
     APXDBvPortfolioView, APXDBvPortfolioBaseView, APXDBvPortfolioBaseCustomView, APXDBvPortfolioSettingExView, APXDBvPortfolioBaseSettingExView, 
     APXDBvCurrencyView, APXDBvSecurityView, APXDBvFXRateView, APXDBvCustodianView,
     COREDBAPXfRealizedGainLossTable,
-    APXRepDBvStmtGroupByPortfolioView, APXRepDBvPortfolioAndStmtGroupCurrencyView, 
+    APXRepDBvPortfolioAndStmtGroupCurrencyView, 
     CoreDBSFPortfolioLatestView,
 )
 from infrastructure.util.dataframe import df_to_dict
@@ -208,18 +211,77 @@ class APXDBvSecurityInMemoryRepository(InMemorySingletonSQLRepository):
 
         return supplemental_data
 
+
+# class APXDBvFXRateByPortfolioAndDateInMemoryRepository(InMemorySingletonSQLRepository):
+#     def __init__(self):
+#         super().__init__(pk_columns=[
+#                             PKColumnMapping('portfolio_code'),
+#                             PKColumnMapping('TradeDate', 'PriceDate'), 
+#                         ], sql_source=APXDBvFXRateView
+#                         , relevant_columns=['SpotRate'])
+
+
 class APXDBvFXRateInMemoryRepository(InMemorySingletonSQLRepository):
     def __init__(self):
         super().__init__(pk_columns=[
                             PKColumnMapping('TradeDate', 'PriceDate'),
-                            PKColumnMapping('NumeratorCurrCode', 'NumeratorCurrencyCode'), 
-                            PKColumnMapping('DenominatorCurrCode', 'DenominatorCurrencyCode'),
-                        ], sql_source=APXDBvFXRateView)
+                            PKColumnMapping('FXNumeratorCurrencyCode', 'NumeratorCurrencyCode'), 
+                            PKColumnMapping('FXDenominatorCurrencyCode', 'DenominatorCurrencyCode'),
+                        ], sql_source=APXDBvFXRateView
+                        , relevant_columns=['SpotRate'])
+
+    def pre_supplement(self, portfolio_code: Union[str,None]=None, trade_date: Union[datetime.date, Tuple[datetime.date, datetime.date], None]=None):
+        # Infer from date & to date from trade_date
+        if isinstance(trade_date, tuple):
+            from_date, to_date = trade_date
+        elif isinstance(trade_date, datetime.date):
+            from_date = to_date = trade_date
+        elif trade_date:
+            logging.error(f'{type(trade_date).__name__}: invalid arg for {self.cn} pre_supplement trade_date: {trade_date}')
+        else:
+            from_date = to_date = None
+
+        # Populate for trade date(s)
+        d = from_date
+        while d <= to_date:
+            self.refresh(params={'PriceDate': d})
+            self.current_data.update({(d, None, None): {'SpotRate': 1.0}})  # Also add spot rate 1.0 for transactions with no FX***CurrencyCode
+            d += datetime.timedelta(days=1)
+
+    def supplement(self, transaction: Transaction) -> Union[Dict, None]:
+        supplemental_data = super().supplement(transaction)
+
+        # Additionally, populate portfolio2firm_fx_rate
+        
+        # If CAD portfolio, portfolio2firm_fx_rate is 1.0
+        if transaction.ReportingCurrencyCode == 'ca':
+            transaction.portfolio2firm_fx_rate = 1.0
+        # Otherwise, need to try to find the SpotRate:
+        else:
+            # Query provided repo for these values
+            pk_column_values = {
+                'PriceDate'                 : transaction.TradeDate,
+                'NumeratorCurrencyCode'     : 'ca',  # Because it's the firm currency (CAD)
+                'DenominatorCurrencyCode'   : transaction.ReportingCurrencyCode,
+            }   
+            get_res = self.get(pk_column_values=pk_column_values)
+            # logging.info(f'{self.cn} supplement get_res: {get_res}')  # TODO_CLEANUP: too verbose
+
+            # Assign as spot rate and return
+            transaction.portfolio2firm_fx_rate = get_res.get('SpotRate')
+        
+        return supplemental_data
+
+    def post_supplement(self, portfolio_code: Union[str,None]=None, trade_date: Union[datetime.date, Tuple[datetime.date, datetime.date], None]=None):
+        # Remove in-memory data as cleanup
+        self.current_data = {}
 
     def refresh(self, params: Dict={}):
         """ Avoid refreshing if no criteria are provided """
         if params.get('PriceDate'):
+            # logging.info(f'{self.cn} pre-refresh: {self.current_data}')  # TODO_CLEANUP: too verbose
             super().refresh(params=params)
+            # logging.info(f'{self.cn} post-refresh: {self.current_data}')  # TODO_CLEANUP: too verbose
         else:
             # Since the view contains many FX rates for every day, refreshing without specifying a date is not feasible
             pass  # TODO_EH: any logging or other behaviour desired here?
@@ -227,6 +289,8 @@ class APXDBvFXRateInMemoryRepository(InMemorySingletonSQLRepository):
     def get(self, pk_column_values: Dict[str, Any]) -> dict:
         # First, try to get values from existing in-memory:
         get_res = super().get(pk_column_values=pk_column_values)
+        # logging.info(f'{self.cn} super GET params: {pk_column_values}')  # TODO_CLEANUP: too verbose
+        # logging.info(f'{self.cn} super GET result: {get_res}')  # TODO_CLEANUP: too verbose
         if get_res and len(get_res):
             # If we got data, return it.
             return get_res
@@ -234,6 +298,7 @@ class APXDBvFXRateInMemoryRepository(InMemorySingletonSQLRepository):
             # If no data, refresh and then try:
             self.refresh(params=pk_column_values)
             return super().get(pk_column_values=pk_column_values)
+
 
 class APXDBvCustodianInMemoryRepository(InMemorySingletonSQLRepository):
     def __init__(self):
@@ -247,11 +312,6 @@ class APXDBvCustodianInMemoryRepository(InMemorySingletonSQLRepository):
             transaction.CustodianName = f"{transaction.CustodianName} ({int(transaction.CustodianID)})"
 
         return supplemental_data
-
-class APXRepDBvStmtGroupByPortfolioInMemoryRepository(InMemorySingletonSQLRepository):
-    def __init__(self):
-        super().__init__(pk_columns=[PKColumnMapping('PortfolioCode')], sql_source=APXRepDBvStmtGroupByPortfolioView
-                            , relevant_columns=['PortfolioGroupISOCode'])
 
 class APXRepDBvPortfolioAndStmtGroupCurrencyInMemoryRepository(InMemorySingletonSQLRepository):
     def __init__(self):
@@ -275,7 +335,8 @@ class CoreDBSFPortfolioLatestInMemoryRepository(InMemorySingletonSQLRepository):
 
 
 class CoreDBRealizedGainLossInMemoryRepository(InMemorySingletonSQLRepository):
-    # TODO_CLEANUP: delete this class, if not used
+    portfolio_code_expander = APXRepDBGroupMembersFlattenedFunc()
+
     def __init__(self):
         super().__init__(pk_columns=[
                                     PKColumnMapping('PortfolioTransactionID'), 
@@ -292,7 +353,7 @@ class CoreDBRealizedGainLossInMemoryRepository(InMemorySingletonSQLRepository):
         elif isinstance(trade_date, datetime.date):
             from_date = to_date = trade_date
         elif trade_date:
-            logging.error(f'{type(trade_date).__name__}: invalid arg for {self.cn} GET trade_date: {trade_date}')
+            logging.error(f'{type(trade_date).__name__}: invalid arg for {self.cn} pre_supplement trade_date: {trade_date}')
         else:
             from_date = to_date = None
 
@@ -324,28 +385,62 @@ class CoreDBRealizedGainLossInMemoryRepository(InMemorySingletonSQLRepository):
         # Return supplemental data
         return supplemental_data
 
+    def post_supplement(self, portfolio_code: Union[str,None]=None, trade_date: Union[datetime.date, Tuple[datetime.date, datetime.date], None]=None):
+        # Remove in-memory data as cleanup
+        self.current_data = {}
 
-class APXDBFXRatesByPortfolioAndTradeDateRepository(InMemoryRepository):
-    """ Combine multiple in-memory repositories for ease of use """
-    currency_repo = APXDBvCurrencyInMemoryRepository()
-    fx_rate_repo = APXDBvFXRateInMemoryRepository()
+
+class APXDBRealizedGainLossInMemoryRepository(InMemorySingletonSQLRepository):
 
     def __init__(self):
         super().__init__(pk_columns=[
-            PKColumnMapping('PortfolioCode'),
-            PKColumnMapping('TradeDate'),
-        ])
+                                    PKColumnMapping('PortfolioTransactionID'), 
+                                    PKColumnMapping('TranID'), 
+                                    PKColumnMapping('LotNumber'), 
+                                ], sql_source=APXDBRealizedGainLossProcAndFunc
+                            , relevant_columns=['RealizedGainLoss', 'RealizedGainLossLocal', 'CostBasis', 'CostBasisLocal', 'Quantity']
+                            , initialize_from_sql=False)
+    
+    def pre_supplement(self, portfolio_code: Union[str,None]=None, trade_date: Union[datetime.date, Tuple[datetime.date, datetime.date], None]=None):
+        # Infer from date & to date from trade_date
+        if isinstance(trade_date, tuple):
+            from_date, to_date = trade_date
+        elif isinstance(trade_date, datetime.date):
+            from_date = to_date = trade_date
+        elif trade_date:
+            logging.error(f'{type(trade_date).__name__}: invalid arg for {self.cn} pre_supplement trade_date: {trade_date}')
+        else:
+            from_date = to_date = None
 
-    def create(self, data: Dict[str, Any]) -> int:
-        raise NotImplementedError(f'Cannot create to {self.cn}!')
-
-    def get(self, pk_column_values: Dict[str, Any]) -> dict:
-        pass  # TODO: implement
+        # Refresh for specified portfolio_code and from/to dates
+        self.refresh(params={'Portfolios': portfolio_code, 'FromDate': from_date, 'ToDate': to_date})
 
     def supplement(self, transaction: Transaction) -> Union[Dict, None]:
-        pass  # TODO: implement (or remove if same as domain base class?)
+        # Save original quantity (we need to save it back after to avoid it getting overwritten)
+        quantity_orig = transaction.Quantity
 
-    def _get_supplemental_data(self, transaction: Transaction) -> Union[Dict, None]:
-        # Assumption: the Transaction already has a ReportingCurrencyCode, which is the portfolio currency
-        # Take the ReportingCurrencyCode and get the 
-        pass
+        # Supplement as normal
+        supplemental_data = super().supplement(transaction)
+
+        # We need to check if there is a quantity in the supplemental data, and if so, then supplement further:
+        if isinstance(supplemental_data, dict):
+            if supplemental_quantity := supplemental_data.get('Quantity'):
+                if hasattr(transaction, 'CostBasis'):
+                    transaction.RptCostBasis = transaction.CostBasis
+                    transaction.RptCostPerUnit = transaction.RptCostBasis / supplemental_quantity
+                else:
+                    logging.debug(f'{transaction.PortfolioTransactionID} has no CostBasis')
+                if hasattr(transaction, 'CostBasisLocal'):
+                    transaction.LocalCostBasis = transaction.CostBasisLocal
+                    transaction.LocalCostPerUnit = transaction.LocalCostBasis / supplemental_quantity
+
+        # Save back the original quantity 
+        transaction.Quantity = quantity_orig
+
+        # Return supplemental data
+        return supplemental_data
+
+    def post_supplement(self, portfolio_code: Union[str,None]=None, trade_date: Union[datetime.date, Tuple[datetime.date, datetime.date], None]=None):
+        # Remove in-memory data as cleanup
+        self.current_data = {}
+

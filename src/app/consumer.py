@@ -99,7 +99,7 @@ def main():
                 preprocessing_supplementary_repos = [
                     APXDBvPortfolioBaseSettingExInMemoryRepository(),
                 ],
-            fx_rate_repo = APXDBvFXRateInMemoryRepository(),
+            # fx_rate_repo = APXDBvFXRateInMemoryRepository(),
         ),
     ]
 

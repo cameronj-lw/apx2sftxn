@@ -92,10 +92,43 @@ def main():
     tolerances = {
         'fx_rate': 0.000051,  # Perl is inconsistent in number of rounding places (sometimes 4, sometimes 9? Not sure)
         'commission': 0.005,  # Perl is inconsistent in number of rounding places (2 places only for intl equities? Not sure)
-        'commission__c': 0.005,  # Perl is inconsistent in number of rounding places (2 places only for intl equities? Not sure)
+        # 'commission__c': 0.005,  # Perl is inconsistent in number of rounding places (2 places only for intl equities? Not sure)
         'trade_amt_firm__c': 0.011,  # Penny diffs in non-CAD portfolios - not sure why... TODO_ROUNDING: figure this out, ideally?
         'cash_flow_firm__c': 0.011,  # Penny diffs in non-CAD portfolios - not sure why... TODO_ROUNDING: figure this out, ideally?
-        'quantity__c': 0.011,  # Penny diffs if quantity is x.xx5 ... could be from inconsistent perl rounding: https://stackoverflow.com/a/41318772 TODO_ROUNDING: figure this out?
+        'quantity__c': 0.011,  # Penny diffs if pre-rounded value is x.xx5 ... could be from inconsistent perl rounding: https://stackoverflow.com/a/41318772 TODO_ROUNDING: figure this out?
+        'realized_gain_port__c': 0.011,  # Penny diffs if pre-rounded value is x.xx5 ... could be from inconsistent perl rounding: https://stackoverflow.com/a/41318772 TODO_ROUNDING: figure this out?
+        'trade_amt_port__c': 0.011,  # Penny diffs if pre-rounded value is x.xx5 ... could be from inconsistent perl rounding: https://stackoverflow.com/a/41318772 TODO_ROUNDING: figure this out?
+        'cash_flow_port__c': 0.011,  # Penny diffs if pre-rounded value is x.xx5 ... could be from inconsistent perl rounding: https://stackoverflow.com/a/41318772 TODO_ROUNDING: figure this out?
+        'trade_amt_sec__c': 0.011,  # Penny diffs if pre-rounded value is x.xx5 ... could be from inconsistent perl rounding: https://stackoverflow.com/a/41318772 TODO_ROUNDING: figure this out?
+        'cash_flow_sec__c': 0.011,  # Penny diffs if pre-rounded value is x.xx5 ... could be from inconsistent perl rounding: https://stackoverflow.com/a/41318772 TODO_ROUNDING: figure this out?
+        'commission__c': 0.011,  # Penny diffs if pre-rounded value is x.xx5 ... could be from inconsistent perl rounding: https://stackoverflow.com/a/41318772 TODO_ROUNDING: figure this out?
+    }
+    fields_to_ignore_zero_vs_none = {
+        """ 
+        For the following fields, the Perl logic sometimes produces NaN (null) and sometimes produces 0.0.
+        Rather than try to achieve this level of replicating the existing logic, we may choose to
+        have the new logic produce whicever of the two is "more common" and not consider Null vs 0.0 as a diff.
+
+        For example: 
+                    
+            select price_per_unit_port__c, count(1) cnt -- select * 
+            from lw.dbo.sf_transaction where 1=1
+            -- and data_handle = 'CJTEST_CR1504'
+            and data_dt between '20240101' and '20240331'
+            and (price_per_unit_port__c = 0 or price_per_unit_port__c is null)
+            group by price_per_unit_port__c
+            order by price_per_unit_port__c
+            --> price_per_unit_port__c  should be NULL
+
+        """
+        'price_per_unit_port__c': True,
+        'price_per_unit_sec__c': True,
+        'trade_amt_port__c': True,
+        'trade_amt_sec__c': True,
+        'trade_amt_firm__c': True,
+        'cash_flow_port__c': True,
+        'cash_flow_sec__c': True,
+        'cash_flow_firm__c': True,
     }
     
     if not args.portfolio_code:
@@ -168,8 +201,9 @@ def main():
                     CoreDBSFPortfolioLatestInMemoryRepository(),
                     APXDBvSecurityInMemoryRepository(),
                     APXDBvCurrencyInMemoryRepository(),
+                    APXDBvFXRateInMemoryRepository(),
                 ],
-                fx_rate_repo = APXDBvFXRateInMemoryRepository(),
+                # fx_rate_repo = APXDBvFXRateInMemoryRepository(),
             ),
         ]
     if args.gen_apx_realized_gain_loss:
@@ -256,7 +290,8 @@ def main():
         logging.info(f"\n\n\n{datetime.datetime.now()}: ===== {pc} =====\n")
 
         # Call the function to compare dataframes
-        compare_dataframes(df1, df2, match_columns, exclude_columns, tolerances, ignore_zeros_vs_none=False)
+        compare_dataframes(df1, df2, match_columns, exclude_columns, tolerances, ignore_zeros_vs_none=False
+                            , fields_to_ignore_zero_vs_none=fields_to_ignore_zero_vs_none)
 
         logging.info(f"\n{datetime.datetime.now()}: ==========\n\n")
 

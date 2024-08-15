@@ -63,7 +63,8 @@ def df_to_dict(df, pk_col_names: List[str]) -> Dict[Any, Dict[str, Any]]:
 
 
 # Function to compare two dataframes row by row
-def compare_dataframes(df1, df2, match_columns, exclude_columns, tolerances={}, ignore_zeros_vs_none=True, typecast_dates=True, ignore_blank_str_vs_none=True):
+def compare_dataframes(df1, df2, match_columns, exclude_columns, tolerances={}, ignore_zeros_vs_none=True, typecast_dates=True
+                        , ignore_blank_str_vs_none=True, fields_to_ignore_zero_vs_none={}):
     # Initialize lists to store matched rows, unmatched rows, and matching rows with differences
     matched_rows = []
     unmatched_rows_df1 = []
@@ -94,7 +95,11 @@ def compare_dataframes(df1, df2, match_columns, exclude_columns, tolerances={}, 
         # Surface zero vs None as diffs (if specified)
         if not ignore_zeros_vs_none:
             if tolerance:
-                return (abs(val1 - val2 <= tolerance))
+                # If exactly one of them is None, the abs(val1-val2) will error. Avoid this:
+                if (val1 is None and val2 is not None) or (val1 is not None and val2 is None):
+                    return False
+                else:
+                    return (abs(val1 - val2) <= tolerance)
             else:
                 # if typecast_dates:  # and isinstance(val1, datetime.date) and not isinstance(val2, datetime.date):
                 #     # print(type(val1))
@@ -132,11 +137,14 @@ def compare_dataframes(df1, df2, match_columns, exclude_columns, tolerances={}, 
             # Iterate over filtered rows in df2
             for index2, row2 in filtered_df2.iterrows():
                 # Check if the values of selected columns match
-                if all(are_equal(row1[col], row2[col], tolerances.get(col), ignore_zeros_vs_none) for col in df1.columns if col not in exclude_columns):
+                if all(are_equal(row1[col], row2[col], tolerances.get(col)
+                        , ignore_zeros_vs_none=(ignore_zeros_vs_none or fields_to_ignore_zero_vs_none.get(col)))
+                        for col in df1.columns if col not in exclude_columns):
                     matched_rows.append((row1, row2))
                 else:
                     # Find non-matching columns
-                    non_matching_columns = [col for col in df1.columns if col not in exclude_columns and not are_equal(row1[col], row2[col], tolerances.get(col), ignore_zeros_vs_none)]
+                    non_matching_columns = [col for col in df1.columns if col not in exclude_columns and 
+                        not are_equal(row1[col], row2[col], tolerances.get(col), ignore_zeros_vs_none=(ignore_zeros_vs_none or fields_to_ignore_zero_vs_none.get(col)))]
                     matching_rows_with_differences.append((row1, row2, non_matching_columns))
     
     # Find unmatched rows in df2

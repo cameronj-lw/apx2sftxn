@@ -72,6 +72,9 @@ class SupplementaryRepository(ABC):
         # The caller may benefit from being provided the supplemental data for other purpose (e.g. efficiency gain)
         return supplemental_data
 
+    def post_supplement(self, portfolio_code: Union[str,None]=None, trade_date: Union[datetime.date, Tuple[datetime.date, datetime.date], None]=None):
+        """ Subclasses should implement this if any cleanup is needed after supplementing """
+
     def _get_supplemental_data(self, transaction: Transaction) -> Union[Dict, None]:
 
         # Get PK column values

@@ -1,5 +1,6 @@
 
 # core python
+import datetime
 import logging
 
 # pypi
@@ -175,7 +176,7 @@ class APXDBvFXRateView(BaseTable):
 	schema = 'AdvApp'
 	table_name = 'vFXRate'
 
-	def read(self, PriceDate=None, NumeratorCurrencyCode=None, DenominatorCurrencyCode=None, AsOfDate=None):
+	def read(self, PriceDate=None, NumeratorCurrencyCode=None, DenominatorCurrencyCode=None, AsOfDate=None, ignore_null_spot_rate=True):
 		"""
 		Read all entries, optionally with criteria
 
@@ -190,7 +191,10 @@ class APXDBvFXRateView(BaseTable):
 			stmt = stmt.where(self.c.DenominatorCurrencyCode == DenominatorCurrencyCode)
 		if AsOfDate is not None:
 			stmt = stmt.where(self.c.AsOfDate == AsOfDate)
-		return self.execute_read(stmt)
+		if ignore_null_spot_rate:
+			stmt = stmt.where(self.c.SpotRate != None)
+		res = self.execute_read(stmt)
+		return res
 
 
 class APXDBvCustodianView(BaseTable):
@@ -211,30 +215,6 @@ class APXDBvCustodianView(BaseTable):
 
 
 """ APXREPDB """
-
-
-class APXRepDBvStmtGroupByPortfolioView(BaseTable):
-	# TODO_CLEANUP: remove this once not used
-	config_section = 'apxrepdb'
-	schema = 'dbo'
-	table_name = 'vStmtGroupByPortfolio'
-
-	def read(self, PortfolioID=None, PortfolioCode=None, PortfolioGroupID=None, PortfolioGroupCode=None):
-		"""
-		Read all entries, optionally with criteria
-
-		:return: DataFrame
-		"""
-		stmt = sql.select(self.table_def)
-		if PortfolioID is not None:
-			stmt = stmt.where(self.c.PortfolioID == PortfolioID)
-		if PortfolioCode is not None:
-			stmt = stmt.where(self.c.PortfolioCode == PortfolioCode)
-		if PortfolioGroupID is not None:
-			stmt = stmt.where(self.c.PortfolioGroupID == PortfolioGroupID)
-		if PortfolioGroupCode is not None:
-			stmt = stmt.where(self.c.PortfolioGroupCode == PortfolioGroupCode)
-		return self.execute_read(stmt)
 
 
 class APXRepDBvPortfolioAndStmtGroupCurrencyView(BaseTable):
@@ -321,6 +301,12 @@ class LWDBAPXAppraisalTable(ScenarioTable):
 
 		:return: DataFrame
 		"""
+
+		# data_dt may be a date, but the column is a datetime.
+		# if this is the case, we should convert to datetime to match:
+		if isinstance(data_dt, datetime.date):
+			data_dt = datetime.datetime.combine(data_dt, datetime.datetime.min.time())
+
 		stmt = sql.select(self.table_def)
 		if scenario is not None:
 			stmt = stmt.where(self.c.scenario == scenario)
@@ -336,64 +322,10 @@ class LWDBAPXAppraisalTable(ScenarioTable):
 			stmt = stmt.where(self.c.SecuritySymbol == SecuritySymbol)
 		if ProprietarySymbol is not None:
 			stmt = stmt.where(self.c.ProprietarySymbol == ProprietarySymbol)
-		return self.execute_read(stmt)
 
-
-class LWDBAPXAppraisalTable_prodlwdb(ScenarioTable):
-	# TODO_CLEANUP: remove once not used
-	config_section = 'lwdb_prod'
-	table_name = 'apx_appraisal'
-
-	def read(self, scenario=None, data_dt=None, PortfolioCode=None, SecurityID=None, SecuritySymbol=None, ProprietarySymbol=None):
-		"""
-		Read all entries, optionally with criteria
-
-		:return: DataFrame
-		"""
-		stmt = sql.select(self.table_def)
-		if scenario is not None:
-			stmt = stmt.where(self.c.scenario == scenario)
-		else:
-			stmt = stmt.where(self.c.scenario == self.base_scenario)
-		if data_dt is not None:
-			stmt = stmt.where(self.c.data_dt == data_dt)
-		if PortfolioCode is not None:
-			stmt = stmt.where(self.c.PortfolioCode == PortfolioCode)
-		if SecurityID is not None:
-			stmt = stmt.where(self.c.SecurityID == SecurityID)
-		if SecuritySymbol is not None:
-			stmt = stmt.where(self.c.SecuritySymbol == SecuritySymbol)
-		if ProprietarySymbol is not None:
-			stmt = stmt.where(self.c.ProprietarySymbol == ProprietarySymbol)
-		return self.execute_read(stmt)
-
-
-class LWDBAPXAppraisalTable_uatlwdb(ScenarioTable):
-	# TODO_CLEANUP: remove once not used
-	config_section = 'lwdb_uat'
-	table_name = 'apx_appraisal'
-
-	def read(self, scenario=None, data_dt=None, PortfolioCode=None, SecurityID=None, SecuritySymbol=None, ProprietarySymbol=None):
-		"""
-		Read all entries, optionally with criteria
-
-		:return: DataFrame
-		"""
-		stmt = sql.select(self.table_def)
-		if scenario is not None:
-			stmt = stmt.where(self.c.scenario == scenario)
-		else:
-			stmt = stmt.where(self.c.scenario == self.base_scenario)
-		if data_dt is not None:
-			stmt = stmt.where(self.c.data_dt == data_dt)
-		if PortfolioCode is not None:
-			stmt = stmt.where(self.c.PortfolioCode == PortfolioCode)
-		if SecurityID is not None:
-			stmt = stmt.where(self.c.SecurityID == SecurityID)
-		if SecuritySymbol is not None:
-			stmt = stmt.where(self.c.SecuritySymbol == SecuritySymbol)
-		if ProprietarySymbol is not None:
-			stmt = stmt.where(self.c.ProprietarySymbol == ProprietarySymbol)
+		# TODO_CLEANUP: too verbose
+		# print(stmt)
+		# print(stmt.compile(self._database.engine, compile_kwargs={"literal_binds": True}))
 		return self.execute_read(stmt)
 
 

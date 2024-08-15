@@ -168,7 +168,6 @@ class KafkaAPXTransactionMessageConsumer(KafkaMessageConsumer):
             # StreamingDataToRefresh(table_class=APXDBvPortfolioBaseCustomView, column_mapping=[KafkaToStreamingDataColumnMapping('PortfolioID', 'PortfolioBaseID')]),
             # StreamingDataToRefresh(table_class=APXDBvPortfolioBaseSettingExView, column_mapping=[KafkaToStreamingDataColumnMapping('PortfolioID', 'PortfolioBaseID')]),
         ],
-        # TODO: add refreshers for APXRepDBvStmtGroupByPortfolioView
         # TODO: add refreshers for CoreDBSFPortfolioLatestInMemoryRepository?
     }
     streaming_data_refreshers = {
@@ -256,7 +255,6 @@ class KafkaAPXTransactionMessageConsumer(KafkaMessageConsumer):
         # AppConfig().get('kafka_topics', 'apxdb_fxratehistory'): [
         #     StreamingDataToRefresh(table_class=APXDBvFXRateView, column_mapping=[KafkaToStreamingDataColumnMapping('NumeratorCurrCode'), KafkaToStreamingDataColumnMapping('DenominatorCurrCode'), KafkaToStreamingDataColumnMapping('AsOfDate')]),
         # ],
-        # TODO: add refreshers for APXRepDBvStmtGroupByPortfolioView
     }
 
     def __init__(self, event_handler: EventHandler, heartbeat_repo: Union[HeartbeatRepository,None]=None):

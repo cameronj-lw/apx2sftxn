@@ -27,7 +27,7 @@ from infrastructure.in_memory_repositories import (
     APXDBvCurrencyInMemoryRepository, APXDBvCustodianInMemoryRepository,
     APXDBvFXRateInMemoryRepository,
     APXRepDBvPortfolioAndStmtGroupCurrencyInMemoryRepository, CoreDBSFPortfolioLatestInMemoryRepository,
-    CoreDBRealizedGainLossInMemoryRepository,
+    CoreDBRealizedGainLossInMemoryRepository, APXDBRealizedGainLossInMemoryRepository
 )
 from infrastructure.message_subscribers import KafkaAPXTransactionMessageConsumer
 from infrastructure.sql_repositories import (
@@ -91,7 +91,7 @@ if __name__ == '__main__':
                 APXDBvCurrencyInMemoryRepository(),
                 APXDBvCustodianInMemoryRepository(),
                 # CoreDBRealizedGainLossSupplementaryRepository(),
-                CoreDBRealizedGainLossInMemoryRepository() if args.use_coredb_sources else APXDBRealizedGainLossSupplementaryRepository(),
+                CoreDBRealizedGainLossInMemoryRepository() if args.use_coredb_sources else APXDBRealizedGainLossInMemoryRepository(),
             ],
             prev_bday_cost_repo = LWDBAPXAppraisalPrevBdayRepository(),
         )
@@ -108,12 +108,13 @@ if __name__ == '__main__':
                 APXDBvCurrencyInMemoryRepository(),
                 APXDBvCustodianInMemoryRepository(),
                 # CoreDBRealizedGainLossSupplementaryRepository(),
-                CoreDBRealizedGainLossInMemoryRepository() if args.use_coredb_sources else APXDBRealizedGainLossSupplementaryRepository(),
+                CoreDBRealizedGainLossInMemoryRepository() if args.use_coredb_sources else APXDBRealizedGainLossInMemoryRepository(),
                 APXRepDBvPortfolioAndStmtGroupCurrencyInMemoryRepository(),
                 CoreDBSFPortfolioLatestInMemoryRepository(),
+                APXDBvFXRateInMemoryRepository(),
             ],
             prev_bday_cost_repo = LWDBAPXAppraisalPrevBdayRepository(),
-            fx_rate_repo = APXDBvFXRateInMemoryRepository(),
+            # fx_rate_repo = APXDBvFXRateInMemoryRepository(),
         )
 
         # Inject dependencies into the Flask app context

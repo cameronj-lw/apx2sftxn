@@ -7,6 +7,7 @@ import logging
 import math
 import numbers
 import os
+import traceback
 from typing import List, Optional, Tuple, Union
 
 # pypi
@@ -52,6 +53,11 @@ class TransactionQueryHandler(ABC):
                                                             # ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 # AttributeError: 'Transaction' object has no attribute 'SecurityID'
 
+    def post_supplement(self, portfolio_code: Union[str,None]=None, trade_date: Union[datetime.date, Tuple[datetime.date, datetime.date], None]=None):
+        for sr in self.preprocessing_supplementary_repos:
+            logging.info(f'Post-supplementing for {sr.cn}')  # TODO_CLEANUP: performance logging
+            sr.post_supplement(portfolio_code, trade_date)
+
     def handle(self, portfolio_code: Union[str,None]=None, trade_date: Union[datetime.date, Tuple[datetime.date, datetime.date], None]=None) -> List[Transaction]:
         source_txns = self.source_txn_repo.get(portfolio_code, trade_date)
         logging.info(f'{self.cn} got {len(source_txns)} from {self.source_txn_repo.cn}')
@@ -59,6 +65,8 @@ class TransactionQueryHandler(ABC):
         logging.info(f'{self.cn} done pre-supplementing for {portfolio_code}, {trade_date}')  # TODO_CLEANUP: performance logging
         self.preprocessing_supplement(source_txns)
         logging.info(f'{self.cn} supplemented with {len(self.preprocessing_supplementary_repos)} repos')  # TODO_CLEANUP: performance logging
+        self.post_supplement(portfolio_code, trade_date)
+        logging.info(f'{self.cn} done post-supplementing for {portfolio_code}, {trade_date}')  # TODO_CLEANUP: performance logging
         return self.process(starting_transactions=source_txns)
 
     @abstractmethod
@@ -289,54 +297,55 @@ class LWTransactionSummaryQueryHandler(TransactionQueryHandler):
 
                     # APXTxns.pm line 1332-1359: update new txn
                     income_local = new_txn.TradeAmountLocal - new_txn.LocalCostBasis  # TODO_EH: what if there's no LocalCostBasis?
-                    fx_rate = 1.0
-                    if txn.TradeAmountLocal:
-                        fx_rate = txn.TradeAmount / txn.TradeAmountLocal
-                    income = fx_rate * income_local
-                    new_txn.TradeDateFX = fx_rate
-                    # TODO: do we need OrderNo?
-                    new_txn.TransactionCode = 'in'
-                    new_txn.TradeAmount = income
-                    new_txn.TradeAmountLocal = income_local
-                    new_txn.RealizedGain = 0.0
-                    new_txn.Commission = 0.0
-                    for attr in ['PricePerUnit', 'PricePerUnitLocal', 'CostPerUnit', 'CostPerUnitLocal', 'Quantity']:
-                        if hasattr(new_txn, attr):
-                            delattr(new_txn, attr)
+                    if abs(income_local) > TINY:  # APXTxns.pm line 1325
+                        fx_rate = 1.0
+                        if txn.TradeAmountLocal:
+                            fx_rate = txn.TradeAmount / txn.TradeAmountLocal
+                        income = fx_rate * income_local
+                        new_txn.TradeDateFX = fx_rate
+                        # TODO: do we need OrderNo?
+                        new_txn.TransactionCode = 'in'
+                        new_txn.TradeAmount = income
+                        new_txn.TradeAmountLocal = income_local
+                        new_txn.RealizedGain = 0.0
+                        new_txn.Commission = 0.0
+                        for attr in ['PricePerUnit', 'PricePerUnitLocal', 'CostPerUnit', 'CostPerUnitLocal', 'Quantity']:
+                            if hasattr(new_txn, attr):
+                                delattr(new_txn, attr)
 
-                    new_txn.NetInterest = income
-                    new_txn.NetDividend = 0.0
-                    new_txn.NetEligDividend = 0.0
-                    new_txn.NetNonEligDividend = 0.0
-                    new_txn.NetFgnIncome = 0.0
-                    new_txn.CapGainsDistrib = 0.0
-                    new_txn.TotalIncome = income
-                    new_txn.LocalTranKeySuffix = '_A_B'
-                    new_txn.LocalTranKey = f"{new_txn.PortfolioCode}_{new_txn.TradeDate.strftime('%Y%m%d')}_{new_txn.SettleDate.strftime('%Y%m%d')}_{new_txn.Symbol1}_{new_txn.PortfolioTransactionID}_{new_txn.TranID}_{new_txn.LotNumber}{new_txn.LocalTranKeySuffix}"
-                    new_txn.add_lineage(f"*** Created as the interest component of {txn.LocalTranKey} ***", source_callable=get_current_callable())
-                    txn.add_lineage(f"sl of ST {txn.Symbol1} -> carved out interest component as separate transaction ({new_txn.LocalTranKey})", source_callable=get_current_callable())
-                    
-                    # APXTxns.pm line 1362-1372: clean up the parent txn for maturities
-                    txn.RealizedGain = txn.TradeAmount - txn.RptCostBasis - income
-                    txn.add_lineage(f"Assigned RealizedGain as TradeAmount-RptCostBasis-(TradeAmountLocal-LocalCostBasis)*fx_rate = "
-                                        f"{txn.TradeAmount}-{txn.RptCostBasis}-({txn.TradeAmountLocal}-{txn.LocalCostBasis})*{fx_rate}"
-                                        , source_callable=get_current_callable()
-                    )
-                    if txn.TradeDate >= txn.MaturityDate1:
-                        txn.PricePerUnit = 100.0
-                        txn.TradeAmount = txn.RptCostBasis
-                        txn.TransactionCode = 'mt'
-                        txn.RealizedGain = 0.0
-                        txn.add_lineage(f"Detected as maturity since TradeDate ({txn.TradeDate}) >= MaturityDate1 ({txn.MaturityDate1}) -> assigned PricePerUnit as 100.0, zeroed RealizedGain, "
-                                            f"assigned TradeAmount as RptCostBasis={txn.RptCostBasis}, assigned TransactionCode as mt"
+                        new_txn.NetInterest = income
+                        new_txn.NetDividend = 0.0
+                        new_txn.NetEligDividend = 0.0
+                        new_txn.NetNonEligDividend = 0.0
+                        new_txn.NetFgnIncome = 0.0
+                        new_txn.CapGainsDistrib = 0.0
+                        new_txn.TotalIncome = income
+                        new_txn.LocalTranKeySuffix = '_A_B'
+                        new_txn.LocalTranKey = f"{new_txn.PortfolioCode}_{new_txn.TradeDate.strftime('%Y%m%d')}_{new_txn.SettleDate.strftime('%Y%m%d')}_{new_txn.Symbol1}_{new_txn.PortfolioTransactionID}_{new_txn.TranID}_{new_txn.LotNumber}{new_txn.LocalTranKeySuffix}"
+                        new_txn.add_lineage(f"*** Created as the interest component of {txn.LocalTranKey} ***", source_callable=get_current_callable())
+                        txn.add_lineage(f"sl of ST {txn.Symbol1} -> carved out interest component as separate transaction ({new_txn.LocalTranKey})", source_callable=get_current_callable())
+                        
+                        # APXTxns.pm line 1362-1372: clean up the parent txn for maturities
+                        txn.RealizedGain = txn.TradeAmount - txn.RptCostBasis - income
+                        txn.add_lineage(f"Assigned RealizedGain as TradeAmount-RptCostBasis-(TradeAmountLocal-LocalCostBasis)*fx_rate = "
+                                            f"{txn.TradeAmount}-{txn.RptCostBasis}-({txn.TradeAmountLocal}-{txn.LocalCostBasis})*{fx_rate}"
                                             , source_callable=get_current_callable()
                         )
-                    else:
-                        txn.TradeAmount = txn.TradeAmount - income
-                        txn.TradeAmountLocal = txn.TradeAmount - income_local
-                        txn.add_lineage(f"Subtracted income ({income}) from TradeAmount and income_local ({income_local}) from TradeAmountLocal", source_callable=get_current_callable())
+                        if txn.TradeDate >= txn.MaturityDate1:
+                            txn.PricePerUnit = 100.0
+                            txn.TradeAmount = txn.RptCostBasis
+                            txn.TransactionCode = 'mt'
+                            txn.RealizedGain = 0.0
+                            txn.add_lineage(f"Detected as maturity since TradeDate ({txn.TradeDate}) >= MaturityDate1 ({txn.MaturityDate1}) -> assigned PricePerUnit as 100.0, zeroed RealizedGain, "
+                                                f"assigned TradeAmount as RptCostBasis={txn.RptCostBasis}, assigned TransactionCode as mt"
+                                                , source_callable=get_current_callable()
+                            )
+                        else:
+                            txn.TradeAmount = txn.TradeAmount - income
+                            txn.TradeAmountLocal = txn.TradeAmount - income_local
+                            txn.add_lineage(f"Subtracted income ({income}) from TradeAmount and income_local ({income_local}) from TradeAmountLocal", source_callable=get_current_callable())
 
-                    raise TransactionShouldBeAddedException(new_txn)
+                        raise TransactionShouldBeAddedException(new_txn)
                 else:
                     pass  # TODO_EH: exception? 
             else:
@@ -350,23 +359,23 @@ class LWTransactionSummaryQueryHandler(TransactionQueryHandler):
 
         # APXTxns.pm line 1389-1396
         if txn.TransactionCode == 'lo' and txn.Symbol1 == 'cash':
-            if not txn.Name4Stmt: 
-                txn.Name4Stmt = 'Cash Transfer Withdrawal'
-                txn.add_lineage(f"lo of cash -> assigned Name4Stmt as Cash Transfer Withdrawal", source_callable=get_current_callable())
-            if not txn.Name4Trading: 
-                txn.Name4Trading = 'Cash Transfer Withdrawal'
-                txn.add_lineage(f"lo of cash -> assigned Name4Trading as Cash Transfer Withdrawal", source_callable=get_current_callable())
+            if not txn.Name4Stmt1: 
+                txn.Name4Stmt1 = 'Cash Transfer Withdrawal'
+                txn.add_lineage(f"lo of cash -> assigned Name4Stmt1 as Cash Transfer Withdrawal", source_callable=get_current_callable())
+            if not txn.Name4Trading1: 
+                txn.Name4Trading1 = 'Cash Transfer Withdrawal'
+                txn.add_lineage(f"lo of cash -> assigned Name4Trading1 as Cash Transfer Withdrawal", source_callable=get_current_callable())
 
         # if the APX transaction is a long-in of a holding in a cash security then change it to a 'Cash Transfer Deposit'
         
         # APXTxns.pm line 1381-1388
         if txn.TransactionCode == 'li' and txn.Symbol1 == 'cash':
-            if not txn.Name4Stmt: 
-                txn.Name4Stmt = 'Cash Transfer Deposit'
-                txn.add_lineage(f"li of cash -> assigned Name4Stmt as Cash Transfer Deposit", source_callable=get_current_callable())
-            if not txn.Name4Trading: 
-                txn.Name4Trading = 'Cash Transfer Deposit'
-                txn.add_lineage(f"li of cash -> assigned Name4Trading as Cash Transfer Deposit", source_callable=get_current_callable())
+            if not txn.Name4Stmt1: 
+                txn.Name4Stmt1 = 'Cash Transfer Deposit'
+                txn.add_lineage(f"li of cash -> assigned Name4Stmt1 as Cash Transfer Deposit", source_callable=get_current_callable())
+            if not txn.Name4Trading1: 
+                txn.Name4Trading1 = 'Cash Transfer Deposit'
+                txn.add_lineage(f"li of cash -> assigned Name4Trading1 as Cash Transfer Deposit", source_callable=get_current_callable())
 
         # if the APX transaction is an interest payment of cash then change it to 'Interest Received'
 
@@ -709,7 +718,7 @@ class LWTransactionSummaryQueryHandler(TransactionQueryHandler):
 
             try:
                 if not i % 1000:
-                    logging.info(f'{self.cn} done processing {i-1} of {len(transactions)} transactions...')
+                    logging.info(f'{self.cn} done processing {i} of {len(transactions)} transactions...')
 
                 # 0a. Add standard attributes
                 self.assign_standard_attributes(txn)
@@ -751,8 +760,24 @@ class LWTransactionSummaryQueryHandler(TransactionQueryHandler):
 
                 # APXTxns.pm line 893: vm/cm switch settle date from weekend to weekday??? 
                 if txn.SecTypeBaseCode1 in ('cm', 'vm') and txn.TransactionCode in ('pd', 'in') and txn.TradeDate == txn.SettleDate:
-                    if txn.CouponDelayDays1 > 0 and not getattr(txn, 'UseSecTypeForCouponDelayDays1', False):
-                        new_settle_date = txn.TradeDate + datetime.timedelta(days=txn.CouponDelayDays1)
+                    if txn.CouponDelayDays1 >= 0 and not getattr(txn, 'UseSecTypeForCouponDelayDays1', False):
+                        new_settle_date = txn.TradeDate
+                        
+                        # First add coupon delay days (APXTxns.pm line 899)
+                        if txn.CouponDelayDays1:
+                            new_settle_date = txn.TradeDate + datetime.timedelta(days=txn.CouponDelayDays1)
+                            txn.add_lineage(f"{txn.TransactionCode} -> Added {txn.CouponDelayDays1} CouponDelayDays1 to SettleDate", source_callable=get_current_callable())
+
+                        # Now if settle date is a weekend, make it to the monday
+                        # Perl logic does not account for the possibility of holiday monday ... so unless required, this logic doesn't either:
+                        if new_settle_date.isoweekday() == 6:  # Saturday
+                            new_settle_date += datetime.timedelta(days=2)
+                            txn.add_lineage(f"{txn.TransactionCode} -> Pushed settle date from Saturday to the following Monday ({new_settle_date})", source_callable=get_current_callable())
+                        elif new_settle_date.isoweekday() == 7:  # Sunday
+                            new_settle_date += datetime.timedelta(days=1)
+                            txn.add_lineage(f"{txn.TransactionCode} -> Pushed settle date from Sunday to the following Monday ({new_settle_date})", source_callable=get_current_callable())
+
+                        # Now assign as SettleDate
                         txn.SettleDate = new_settle_date
 
             # 8. Ignore dividend reclaims
@@ -766,8 +791,7 @@ class LWTransactionSummaryQueryHandler(TransactionQueryHandler):
                     raise TransactionShouldBeRemovedException(txn)
 
                 # APXTxns.pm line 963
-                # logging.info(txn)  # TODO_CLEANUP: debug 20240726
-                if txn.TransactionCode in ('dr', 'dv') and txn.SecTypeBaseCode2 == 'aw' and txn.SecurityID2 is None:
+                if txn.TransactionCode in ('dr', 'dv') and txn.SecTypeBaseCode2 == 'aw' and 'none' in txn.Symbol2:
                     raise TransactionShouldBeRemovedException(txn)
 
             # 10. Add supplementary information regarding broker, custodian, portfolio type, portfolio name, portfolio report heading
@@ -810,8 +834,9 @@ class LWTransactionSummaryQueryHandler(TransactionQueryHandler):
             except TransactionShouldBeRemovedException as e:
                 indices_to_remove.append(i)
             except Exception as e:
-                logging.error(f'Exception from the following Transaction: {txn}')
-                logging.error(e)
+                logging.exception(f'Exception from the following Transaction: {txn}')
+                logging.exception(traceback.format_exc())
+                logging.exception(e)
 
         # 100a. Remove transactions which were identified to remove
         for i in reversed(indices_to_remove):
@@ -860,22 +885,6 @@ class LWTransactionSummaryQueryHandler(TransactionQueryHandler):
 @dataclass
 class LWAPX2SFTransactionQueryHandler(LWTransactionSummaryQueryHandler):
     """ Generate txns for sending to SF. See http://lwweb/wiki/bin/view/Systems/ApxSmes/APXToSFTXN """
-    fx_rate_repo: SupplementaryRepository  # We'll use this to get the portf2firm currency FX rate (if different)
-
-    def get_portfolio2firm_fx_rate(self, txn: Transaction):
-        # If CAD portfolio, return 1.0 - no need to query
-        if txn.ReportingCurrencyCode == 'ca':
-            return 1.0
-
-        # Query provided repo for these values
-        pk_column_values = {
-            'PriceDate'                 : txn.TradeDate,
-            'NumeratorCurrencyCode'     : 'ca',  # Because it's the firm currency (CAD)
-            'DenominatorCurrencyCode'   : txn.ReportingCurrencyCode,
-        }   
-        get_res = self.fx_rate_repo.get(pk_column_values=pk_column_values)
-
-        return get_res.get('SpotRate')
 
     def assign_tradedate_settledate_dt(self, txn: Transaction):
         # apx2sf.pl line 2788-2793
@@ -890,7 +899,16 @@ class LWAPX2SFTransactionQueryHandler(LWTransactionSummaryQueryHandler):
             else:
                 txn.CashFlowLocal = trade_amount_local
 
-    def assign_trade_amt_cash_flow_firm_ccy(self, txn: Transaction, portfolio2firm_fx_rate: dict):
+    def assign_trade_amt_cash_flow_firm_ccy(self, txn: Transaction):
+        # apx2sf.pl line 2916-2944: Assign TradeAmount & CashFlow in firm ccy
+        for attr in ('TradeAmount', 'CashFlow'):
+            if portf_ccy_attr_val := getattr(txn, attr, None):
+                firm_ccy_val = portf_ccy_attr_val * txn.portfolio2firm_fx_rate
+                setattr(txn, f'{attr}Firm', firm_ccy_val)
+                txn.add_lineage(f"Assigned {attr}Firm as {attr} * portfolio2firm_fx_rate = {portf_ccy_attr_val} * {txn.portfolio2firm_fx_rate} = {firm_ccy_val}", source_callable=get_current_callable())
+
+    def assign_trade_amt_cash_flow_firm_ccy_OLD(self, txn: Transaction, portfolio2firm_fx_rate: dict):
+        # TODO_CLEANUP: remove once confirmed not used
         # apx2sf.pl line 2916-2944: Assign TradeAmount & CashFlow in firm ccy
         for attr in ('TradeAmount', 'CashFlow'):
             if portf_ccy_attr_val := getattr(txn, attr, None):
@@ -904,13 +922,8 @@ class LWAPX2SFTransactionQueryHandler(LWTransactionSummaryQueryHandler):
 
         # Below is SF-specific processing: 
         
-        # We'll read FX rate once per portfolio rather than for every txn, for performance:
-        portfolio2firm_fx_rate = {}
-
         # Loop through transactions
         for txn in transactions:
-            if txn.portfolio_code not in portfolio2firm_fx_rate:
-                portfolio2firm_fx_rate[txn.portfolio_code] = self.get_portfolio2firm_fx_rate(txn)
 
             self.assign_tradedate_settledate_dt(txn)
 
@@ -937,7 +950,7 @@ class LWAPX2SFTransactionQueryHandler(LWTransactionSummaryQueryHandler):
                     txn.Warning = warn_msg
                     # TODO_EH: further error handling here? 
 
-            self.assign_trade_amt_cash_flow_firm_ccy(txn, portfolio2firm_fx_rate)
+            self.assign_trade_amt_cash_flow_firm_ccy(txn)
 
         # Now we have processed the transactions. Return them:
         return transactions

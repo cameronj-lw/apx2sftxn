@@ -122,15 +122,37 @@ class LWDBAPXAppraisalPrevBdayRepository(SupplementaryRepository):
         elif len(res_dicts):
             return res_dicts[0]
         else:
-            logging.debug(f"Found 0 rows in {self.table.cn} for {prev_bday} {pk_column_values.get('PortfolioCode')} {pk_column_values.get('SecurityID')}!")
+            logging.info(f"Found 0 rows in {self.table.cn} for {prev_bday} {pk_column_values.get('PortfolioCode')} {pk_column_values.get('SecurityID')}!")
+            logging.info(f"Querying for {trade_date} as plan B...")
+                
+            # Query table
+            res_df = self.table.read(data_dt=trade_date, PortfolioCode=pk_column_values.get('PortfolioCode'), SecurityID=pk_column_values.get('SecurityID'))
+            res_df['portfolio_code'] = res_df['PortfolioCode']
+            
+            # Add calculated columns
+            res_df['LocalCostPerUnit'] = res_df['LocalUnadjustedCostBasis'] / res_df['Quantity']
+            res_df['RptCostPerUnit'] = res_df['UnadjustedCostBasis'] / res_df['Quantity']
+            res_dicts = res_df[self.relevant_columns].to_dict('records')
+
+            # Should be 1 row max... sanity check... # TODO_EH: what if this has more than one row?
+            if len(res_dicts) > 1: 
+                logging.info(f"Found multiple rows in {self.table.cn} for {trade_date} {pk_column_values.get('PortfolioCode')} {pk_column_values.get('SecurityID')}!")
+                return res_dicts[0]
+            elif len(res_dicts):
+                logging.info(f'Found a row for {trade_date} in plan B!')
+                return res_dicts[0]
+                
             return {}
 
     def supplement(self, transaction: Transaction) -> Union[Dict, None]:
         supplemental_data = super().supplement(transaction)
 
         # Additionally, update the transaction's per-unit values:
-        transaction.LocalCostBasis = transaction.LocalCostPerUnit * transaction.Quantity
-        transaction.RptCostBasis = transaction.RptCostPerUnit * transaction.Quantity
+        if hasattr(transaction, 'Quantity'):
+            if hasattr(transaction, 'LocalCostPerUnit'):
+                transaction.LocalCostBasis = transaction.LocalCostPerUnit * transaction.Quantity
+            if hasattr(transaction, 'RptCostPerUnit'):
+                transaction.RptCostBasis = transaction.RptCostPerUnit * transaction.Quantity
 
         return supplemental_data
 
@@ -274,7 +296,7 @@ class APXDBTransactionActivityRepository(TransactionRepository):
         
         # Find dividends with SETTLE date within the specified trade_date range
         dividends = [t for t in transactions 
-            if from_date <= t.SettleDate.date() <= to_date and t.TransactionCode == 'dv']
+            if from_date <= t.SettleDate <= to_date and t.TransactionCode == 'dv']
 
         # Read realized gains proc once (avoids reading it for every dividend separately)
         # realized_gains_df = self.realized_gains_source.read(Portfolios=portfolio_code, FromDate=historical_from_date, ToDate=to_date)
@@ -338,7 +360,7 @@ class APXDBTransactionActivityRepository(TransactionRepository):
         # dividends: updated above based on any identified sl/wd to "merge" in
         # Combine these two, then return the combined result
         res_transactions = [t for t in transactions
-            if from_date <= t.TradeDate.date() <= to_date and t.TransactionCode != 'dv']
+            if from_date <= t.TradeDate <= to_date and t.TransactionCode != 'dv']
         res_transactions.extend(dividends)
         return res_transactions
 
@@ -367,7 +389,7 @@ class APXDBDividendRepository(TransactionRepository):
         transactions = [Transaction(**d) for d in res_df.to_dict('records')]
 
         # Find dividends with SETTLE date with the specified trade_date
-        dividends = [t for t in transactions if t.SettleDate.date() == trade_date and t.TransactionCode == 'dv']
+        dividends = [t for t in transactions if t.SettleDate == trade_date and t.TransactionCode == 'dv']
 
         if not len(dividends):
             return []
@@ -666,6 +688,13 @@ class CoreDBRealizedGainLossSupplementaryRepository(SupplementaryRepository):
             return {}
 
     def supplement(self, transaction: Transaction) -> Union[Dict, None]:
+        # Dividends may already have the RealizedGainLoss assigned based on 
+        # RealizedGainLoss from the 'sl' transaction. If so, it should not be supplemented here, since 
+        # doing so would overwrite the 'sl' transaction values.
+        if transaction.TransactionCode == 'dv' and (rgl := getattr(transaction, 'RealizedGainLoss', None)):
+            transaction.add_lineage(f"{transaction.TransactionCode} -> not supplementing, in order to preserve its RealizedGainLoss {rgl}", source_callable=get_current_callable())
+            return None
+
         # Save original quantity (we need to save it back after to avoid it getting overwritten)
         quantity_orig = transaction.Quantity
 
@@ -1319,17 +1348,17 @@ class COREDBSFTransactionRepository(TransactionRepository):
         Txn2TableColMap('Quantity'         , 'quantity__c'
                             , lambda x: x if not x else normal_round(x, 2)),
         Txn2TableColMap('TradeAmountLocal' , 'trade_amt_sec__c'
-                            , lambda x: x if not x else normal_round(x, 2)),
+                            , lambda x: 0 if not x else normal_round(x, 2)),
         Txn2TableColMap('TradeAmount'      , 'trade_amt_port__c'
-                            , lambda x: x if not x else normal_round(x, 2)),
+                            , lambda x: 0 if not x else normal_round(x, 2)),
         Txn2TableColMap('TradeAmountFirm'  , 'trade_amt_firm__c'
-                            , lambda x: x if not x else normal_round(x, 2)),
+                            , lambda x: 0 if not x else normal_round(x, 2)),
         Txn2TableColMap('CashFlowLocal'    , 'cash_flow_sec__c'
-                            , lambda x: x if not x else normal_round(x, 2)),
+                            , lambda x: 0 if not x else normal_round(x, 2)),
         Txn2TableColMap('CashFlow'         , 'cash_flow_port__c'
-                            , lambda x: x if not x else normal_round(x, 2)),
+                            , lambda x: 0 if not x else normal_round(x, 2)),
         Txn2TableColMap('CashFlowFirm'     , 'cash_flow_firm__c'
-                            , lambda x: x if not x else normal_round(x, 2)),
+                            , lambda x: 0 if not x else normal_round(x, 2)),
         Txn2TableColMap('PricePerUnit'     , 'price_per_unit_port__c'
                             , lambda x: x if not x else normal_round(x, 9)),
         Txn2TableColMap('PricePerUnitLocal', 'price_per_unit_sec__c'
