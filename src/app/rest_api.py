@@ -65,11 +65,11 @@ if __name__ == '__main__':
         parser.add_argument('--reset_offset', '-ro', action='store_true', default=False, help='Reset consumer offset to beginning')
         parser.add_argument('--log_level', '-l', type=str.upper, choices=['DEBUG', 'INFO', 'WARN', 'ERROR', 'CRITICAL'], help='Log level')
         parser.add_argument('--kafka_consumer', '-kc', action='store_true', default=False, help='Activate kafka consumer to keep in-memory repos updated')
-        parser.add_argument('--use_coredb_sources', '-ucs', action='store_true', default=False, help='Use CoreDB versions of APX procs/funcs, asot querying APX procs/funcs directly')
+        # parser.add_argument('--use_coredb_sources', '-ucs', action='store_true', default=False, help='Use CoreDB versions of APX procs/funcs, asot querying APX procs/funcs directly')
         args = parser.parse_args()
 
         base_dir = AppConfig().get("logging", "base_dir")
-        os.environ['APP_NAME'] = AppConfig().get("app_name", "apx2sftxn_rest_api")
+        os.environ['APP_NAME'] = AppConfig().get("app_name", "lw_txn_engine_rest_api")
         setup_logging(base_dir=base_dir, log_level_override=args.log_level)
 
         # Get configs and run flask app
@@ -79,7 +79,8 @@ if __name__ == '__main__':
 
         # Initialize command handlers and query handlers
         lw_transaction_summary_query_handler = LWTransactionSummaryQueryHandler(
-            source_txn_repo = CoreDBTransactionActivityRepository() if args.use_coredb_sources else APXDBTransactionActivityRepository(),
+            # source_txn_repo = CoreDBTransactionActivityRepository() if args.use_coredb_sources else APXDBTransactionActivityRepository(),
+            source_txn_repo = CoreDBTransactionActivityRepository(),
             preprocessing_supplementary_repos = [
                 APXDBvPortfolioInMemoryRepository(),
                 APXDBvPortfolioBaseInMemoryRepository(),
@@ -91,12 +92,14 @@ if __name__ == '__main__':
                 APXDBvCurrencyInMemoryRepository(),
                 APXDBvCustodianInMemoryRepository(),
                 # CoreDBRealizedGainLossSupplementaryRepository(),
-                CoreDBRealizedGainLossInMemoryRepository() if args.use_coredb_sources else APXDBRealizedGainLossInMemoryRepository(),
+                # CoreDBRealizedGainLossInMemoryRepository() if args.use_coredb_sources else APXDBRealizedGainLossInMemoryRepository(),
+                CoreDBRealizedGainLossInMemoryRepository(),
             ],
             prev_bday_cost_repo = LWDBAPXAppraisalPrevBdayRepository(),
         )
         lw_apx2sftxn_query_handler = LWAPX2SFTransactionQueryHandler(
-            source_txn_repo = CoreDBTransactionActivityRepository() if args.use_coredb_sources else APXDBTransactionActivityRepository(),
+            # source_txn_repo = CoreDBTransactionActivityRepository() if args.use_coredb_sources else APXDBTransactionActivityRepository(),
+            source_txn_repo = CoreDBTransactionActivityRepository(),
             preprocessing_supplementary_repos = [
                 APXDBvPortfolioInMemoryRepository(),
                 APXDBvPortfolioBaseInMemoryRepository(),
@@ -108,7 +111,8 @@ if __name__ == '__main__':
                 APXDBvCurrencyInMemoryRepository(),
                 APXDBvCustodianInMemoryRepository(),
                 # CoreDBRealizedGainLossSupplementaryRepository(),
-                CoreDBRealizedGainLossInMemoryRepository() if args.use_coredb_sources else APXDBRealizedGainLossInMemoryRepository(),
+                # CoreDBRealizedGainLossInMemoryRepository() if args.use_coredb_sources else APXDBRealizedGainLossInMemoryRepository(),
+                CoreDBRealizedGainLossInMemoryRepository(),
                 APXRepDBvPortfolioAndStmtGroupCurrencyInMemoryRepository(),
                 CoreDBSFPortfolioLatestInMemoryRepository(),
                 APXDBvFXRateInMemoryRepository(),

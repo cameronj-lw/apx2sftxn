@@ -25,7 +25,7 @@ TINY = 0.000001  # APXTxns.pm line 10, apx2txnrpts.pl line 87
 class TransactionProcessingEngine(ABC):
     source_queue_repo: TransactionProcessingQueueRepository  # we'll read from this queue to detect new transactions for processing, and update status post-processing
     target_txn_repos: List[TransactionRepository]  # we'll save results here
-    target_queue_repos: List[TransactionProcessingQueueRepository]  # we'll save as PENDING queue_status here
+    target_queue_repos: List[TransactionProcessingQueueRepository]  # we'll save as PENDING queue_status here  # TODO_CLEANUP: retire if not used?
 
     def run(self):
         """ Subclasses may override if this default behaviour is not desired """
