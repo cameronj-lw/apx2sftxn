@@ -7,6 +7,7 @@ import logging
 import math
 import numbers
 import os
+import traceback
 from typing import List, Optional, Union
 
 
@@ -27,8 +28,33 @@ class TransactionProcessingEngine(ABC):
     target_txn_repos: List[TransactionRepository]  # we'll save results here
     target_queue_repos: List[TransactionProcessingQueueRepository]  # we'll save as PENDING queue_status here  # TODO_CLEANUP: retire if not used?
 
+    def start(self):
+        """ Default behaviour upon startup """
+
+        # If the engine was interrupted / shut down during processing, there will be item(s) remaining in "IN_PROGRESS" status.
+        # Find these items and update them to "PENDING", so that the will be processed.
+        in_progress_items = self.source_queue_repo.get(queue_status=QueueStatus.IN_PROGRESS)
+        try:
+            if not len(in_progress_items):
+                return
+
+            logging.info(f'{self.cn} found {len(in_progress_items)} items with IN_PROGRESS status. Changing to PENDING...')
+            for item in in_progress_items:
+                # Update to PENDING
+                old_queue_status = item.queue_status
+                item.queue_status = QueueStatus.PENDING
+                queue_update_res = self.source_queue_repo.update_queue_status(queue_item=item, old_queue_status=old_queue_status)
+            
+            # All updates to PENDING are complete
+            logging.info(f'Successfully set {len(in_progress_items)} items from IN_PROGRESS to PENDING.')
+
+        except Exception as e:
+            logging.exception(f'Exception while setting queue item from IN_PROGRESS to PENDING: {e} {traceback.format_exc()}')
+            # TODO_SUPPORT: Send alert?
+            return
+
     def run(self):
-        """ Subclasses may override if this default behaviour is not desired """
+        """ Default behaviour to "run" an engine. Process each PENDING queue item from the source_queue_repo. """
         # TODO: Should this be made to accept optional starting_transactions? And/or return the results?
         # Unsure if accepting starting_transactions from multiple portfolios/dates would work...
 
@@ -70,6 +96,9 @@ class TransactionProcessingEngine(ABC):
             item.queue_status = QueueStatus.SUCCESS
             queue_update_res = self.source_queue_repo.update_queue_status(queue_item=item, old_queue_status=old_queue_status)
 
+            if queue_update_res:
+                logging.info(f'{self.cn} successfully processed {item.portfolio_code} for trade date {item.trade_date}.')
+
     @property
     def cn(self):  # Class name. Avoids having to print/log type(self).__name__.
         return type(self).__name__
@@ -91,8 +120,11 @@ class StraightThruTransactionProcessingEngine(TransactionProcessingEngine):
     def process(self, queue_item: Optional[TransactionProcessingQueueItem]=None
                     , starting_transactions: Optional[List[Transaction]]=None) -> List[Transaction]:
         # TODO: should this support a caller providing starting_transactions?
-        logging.info(f'{self.cn} processing {queue_item}')
-        res_transactions = self.source_txn_repo.get(portfolio_code=queue_item.portfolio_code, trade_date=queue_item.trade_date)
+        logging.info(f'{self.cn} processing {queue_item.portfolio_code} for trade date {queue_item.trade_date} from {self.source_txn_repo}...')
+        if hasattr(self.source_txn_repo, 'get_raw'):
+            res_transactions = self.source_txn_repo.get_raw(portfolio_code=queue_item.portfolio_code, trade_date=queue_item.trade_date)
+        else:
+            res_transactions = self.source_txn_repo.get(portfolio_code=queue_item.portfolio_code, trade_date=queue_item.trade_date)
         
         # Populate the portfolio_code, modified_by, trade_date, lineage
         for txn in res_transactions:

@@ -265,15 +265,13 @@ class APXDBTransactionActivityRepository(TransactionRepository):
         # Infer from & to dates, based on trade_date type
         if isinstance(trade_date, tuple):
             from_date, to_date = trade_date
-            historical_from_date = from_date + datetime.timedelta(days=-70)
         elif isinstance(trade_date, datetime.date):
             from_date = to_date = trade_date
-            historical_from_date = from_date + datetime.timedelta(days=-70)
         else:
             return []  # TODO_EH: exception?
 
         # Get source transactions, including historical
-        res_df = self.txn_source.read(Portfolios=portfolio_code, FromDate=historical_from_date, ToDate=to_date)
+        res_df = self.txn_source.read(Portfolios=portfolio_code, FromDate=from_date, ToDate=to_date)
         # res_df = self.txn_source.read(portfolio_code=portfolio_code, from_date=historical_from_date, to_date=to_date)
         transactions = [Transaction(**d) for d in res_df.to_dict('records')]
         return transactions
@@ -844,10 +842,10 @@ class CoreDBTransactionActivityRepository(TransactionRepository):
                     delete_stmt = delete_stmt.where(self.txn_source.c.portfolio_code == txn.PortfolioCode)
                 if hasattr(txn, 'PortfolioBaseCode'):
                     delete_stmt = delete_stmt.where(self.txn_source.c.portfolio_code == txn.PortfolioBaseCode)
-                if hasattr(txn, 'CloseDate'):
-                    delete_stmt = delete_stmt.where(self.txn_source.c.CloseDate == txn.CloseDate)
+                if hasattr(txn, 'TradeDate'):
+                    delete_stmt = delete_stmt.where(self.txn_source.c.TradeDate == txn.TradeDate)
                 elif hasattr(txn, 'trade_date'):
-                    delete_stmt = delete_stmt.where(self.txn_source.c.CloseDate == txn.trade_date)
+                    delete_stmt = delete_stmt.where(self.txn_source.c.TradeDate == txn.trade_date)
                 else:
                     logging.error(f'Txn has no trade date!? {txn}')
                     # TODO_EH: raise exception?

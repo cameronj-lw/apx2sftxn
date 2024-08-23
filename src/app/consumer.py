@@ -14,7 +14,7 @@ from infrastructure.message_subscribers import KafkaAPXTransactionMessageConsume
 from application.event_handlers import TransactionEventHandler
 from infrastructure.sql_repositories import (
     MGMTDBHeartbeatRepository, 
-    CoreDBTransactionActivityQueueRepository,
+    CoreDBRealizedGainLossQueueRepository, CoreDBTransactionActivityQueueRepository,
 )
 from infrastructure.in_memory_repositories import APXDBvPortfolioInMemoryRepository
 from infrastructure.util.config import AppConfig
@@ -34,8 +34,16 @@ def main():
     os.environ['APP_NAME'] = AppConfig().get("app_name", "lw_txn_engine_kafka_consumer_transaction")
     setup_logging(base_dir=base_dir, log_level_override=args.log_level)
 
+    # kafka_consumer = KafkaAPXTransactionMessageConsumer(
+    #     event_handler = TransactionEventHandler(
+    #         target_queue_repos = [CoreDBRealizedGainLossQueueRepository(), CoreDBTransactionActivityQueueRepository()],
+    #         supplementary_repos = [APXDBvPortfolioInMemoryRepository()],
+    #     ),
+    #     heartbeat_repo = MGMTDBHeartbeatRepository(),
+    # )
+
     kafka_consumer = KafkaAPXTransactionMessageConsumer(
-        event_handler = TransactionEventHandler(
+        transaction_event_handler = TransactionEventHandler(
             target_queue_repos = [CoreDBRealizedGainLossQueueRepository(), CoreDBTransactionActivityQueueRepository()],
             supplementary_repos = [APXDBvPortfolioInMemoryRepository()],
         ),

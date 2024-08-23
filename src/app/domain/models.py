@@ -17,7 +17,8 @@ class Transaction(SimpleNamespace):
     def cn(self):  # Class name. Avoids having to print/log type(self).__name__.
         return type(self).__name__
 
-    def __post_init__(self):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
         # Post-assign these interchangeable attributes:
         if hasattr(self, 'PortfolioID'):
             self.PortfolioBaseID = self.PortfolioID

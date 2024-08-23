@@ -134,7 +134,7 @@ class BaseTable(object):
         :returns: int of number of rows
         """
         select_stmt = sql.select(func.count().label("row_count")).select_from(self.table_def)
-        logging.info(str(select_stmt))
+        logging.debug(str(select_stmt))
         read_df = self.execute_read(select_stmt)
         print(read_df)
         if len(read_df) == 1:
@@ -278,7 +278,8 @@ class BaseTable(object):
 
     @classmethod
     def readable_name(self):
-        return f'{self._database.engine.host}.{self._database.engine.db}.{self.schema}.{self.table_name} table'
+        return f'{self.config_section} {self.schema}.{self.table_name} table'
+        # return f'{self._database.engine.host}.{self._database.engine.db}.{self.schema}.{self.table_name} table'
         
 
 class ScenarioTable(BaseTable):

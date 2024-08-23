@@ -1,6 +1,6 @@
 @echo off
 call C:\lw\python_venv\311-lw-transaction-engine\integration-lw-transaction-engine\src\.venv\Scripts\activate.bat
-call python C:\lw\python_venv\311-lw-transaction-engine\integration-lw-transaction-engine\src\app\rest_api.py
+call python C:\lw\python_venv\311-lw-transaction-engine\integration-lw-transaction-engine\src\app\rest_api.py -kc
 
 :: Now implement shutdown
 for /f "tokens=2 delims=:" %%i in ('ipconfig ^| findstr /i "IPv4 Address"') do set ip=%%i

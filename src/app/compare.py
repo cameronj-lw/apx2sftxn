@@ -43,6 +43,7 @@ from infrastructure.sql_repositories import (
 )
 from infrastructure.util.config import AppConfig
 from infrastructure.util.logging import setup_logging
+from infrastructure.util.mail import send_email
 
 
 from infrastructure.sql_tables import (
@@ -50,6 +51,7 @@ from infrastructure.sql_tables import (
     COREDBSFTransactionTable, LWDBSFTransactionTable,
 )
 from infrastructure.util.dataframe import compare_dataframes
+from infrastructure.util.logging import get_log_file_full_path
 
 
 
@@ -58,17 +60,23 @@ def main():
     parser.add_argument('--log_level', '-l', type=str.upper, choices=['DEBUG', 'INFO', 'WARN', 'ERROR', 'CRITICAL'], help='Log level')
     parser.add_argument('--from_date', '-fd', type=lambda d: datetime.datetime.strptime(d, '%Y-%m-%d').date())
     parser.add_argument('--to_date', '-td', type=lambda d: datetime.datetime.strptime(d, '%Y-%m-%d').date())
+    parser.add_argument('--calendar_days_back', type=int, help='If from_date is not provided, assign it as this many days before to_date')
     parser.add_argument('--portfolio_code', '-pc', nargs='+', default=[])
     parser.add_argument('--gen_apx_realized_gain_loss', '-gargl', action='store_true', default=False)
     parser.add_argument('--gen_apx_txn_activity', '-gata', action='store_true', default=False)
     parser.add_argument('--run', '-run', action='store_true', default=False)
     parser.add_argument('--compare', '-diff', action='store_true', default=False)
     parser.add_argument('--no_log', '-nl', action='store_true', default=False)
+    parser.add_argument('--email', type=str, help='Email recipient(s), can specify multiple comma-delimited.', default='')
     
     args = parser.parse_args()
 
+    # Derive from_date if not provided, based on calendar_days_back
+    if not args.from_date and args.calendar_days_back:
+        args.from_date = args.to_date - datetime.timedelta(days=args.calendar_days_back)
+
     base_dir = AppConfig().get("logging", "base_dir")
-    os.environ['APP_NAME'] = AppConfig().get("app_name", "apx2sftxn_compare")
+    os.environ['APP_NAME'] = AppConfig().get("app_name", "lw_txn_engine_compare")
     if not args.no_log:
         setup_logging(base_dir=base_dir, log_level_override=args.log_level)
 
@@ -256,6 +264,12 @@ def main():
     else:
         engines = []
 
+    # Initialize
+    portfolios_with_diffs = []
+    transaction_diff_count = total_transaction_count = 0
+    table1 = COREDBSFTransactionTable()
+    table2 = LWDBSFTransactionTable()
+
     for pc in args.portfolio_code:
         result = None
         for engine in engines:
@@ -282,18 +296,49 @@ def main():
             df2 = APXRepDBLWTxnSummaryTable().read(scenario='BASE', data_handle='37020804B005458B874D74434DBCD0A0', portfolio_code=pc, from_date=args.from_date, to_date=args.to_date)
     
         match_columns = ['lw_tran_id__c']  # for testing APX2SFTxn
-        df1 = COREDBSFTransactionTable().read(portfolio_code=pc, from_date=args.from_date, to_date=args.to_date)
-        df2 = LWDBSFTransactionTable().read(portfolio_code=pc, from_date=args.from_date, to_date=args.to_date
-                                                , data_handle='CJTEST_CR1504' # 'CJTEST20240620_v1'
+        df1 = table1.read(portfolio_code=pc, from_date=args.from_date, to_date=args.to_date)
+        df2 = table2.read(portfolio_code=pc, from_date=args.from_date, to_date=args.to_date
+                                                , data_handle='apx2sf_txn_staging'  # 'CJTEST_CR1504' # 'CJTEST20240620_v1'
                                             )
 
-        logging.info(f"\n\n\n{datetime.datetime.now()}: ===== {pc} =====\n")
+        logging.info(f"\n\n\n: ===== {pc} =====\n")
 
         # Call the function to compare dataframes
-        compare_dataframes(df1, df2, match_columns, exclude_columns, tolerances, ignore_zeros_vs_none=False
-                            , fields_to_ignore_zero_vs_none=fields_to_ignore_zero_vs_none)
+        matched, unmatched1, unmatched2, diffs = compare_dataframes(df1, df2, match_columns, exclude_columns, tolerances, ignore_zeros_vs_none=False
+                            , fields_to_ignore_zero_vs_none=fields_to_ignore_zero_vs_none
+                            , df1_name=table1.readable_name(), df2_name=table2.readable_name()
+            )
 
-        logging.info(f"\n{datetime.datetime.now()}: ==========\n\n")
+        logging.info(f"\n: ==========\n\n")
+
+        # If any diffs, flag this portfolio
+        if pc_diff_count := len(unmatched1) + len(unmatched2) + len(diffs):
+            transaction_diff_count += pc_diff_count
+            portfolios_with_diffs.append(pc)
+
+        # Add to total count
+        total_transaction_count += len(df2)
+
+    # Send email, if requested
+    if len(args.email):
+        # Parse possibly comma-delimited recipients
+        recipients = args.email.split(',')
+
+        subject = f"Daily LW-Transaction-Engine comparison: {args.from_date.isoformat()} thru {args.to_date.isoformat()}"
+        pct = (total_transaction_count - transaction_diff_count) / total_transaction_count * 100.0 if total_transaction_count else 0.0
+        body = f"Found {transaction_diff_count} diff(s) of total {total_transaction_count} transactions ({pct:.1f}% accuracy)"
+        if len(portfolios_with_diffs):
+            body += f"\n\nThe following portfolios had diff(s): {', '.join(portfolios_with_diffs)}"
+        else:
+            body += "\n\nNo portfolios had diffs."
+        body += f"\n\nPlease review the attached log for details. {get_log_file_full_path()}"
+        
+        send_email(
+            subject=subject,
+            body=body,
+            recipients=recipients,
+            files=[get_log_file_full_path()],
+        )
 
 if __name__ == "__main__":
     main()

@@ -129,7 +129,7 @@ class APXRepDBSecurityHashInMemoryRepository(InMemorySingletonSQLRepository):
 
 class APXDBvPortfolioInMemoryRepository(InMemorySingletonSQLRepository):    
     def __init__(self):
-        super().__init__(pk_columns=[PKColumnMapping('PortfolioBaseID', 'PortfolioID')], sql_source=APXDBvPortfolioView
+        super().__init__(pk_columns=[PKColumnMapping('PortfolioID', 'PortfolioID')], sql_source=APXDBvPortfolioView
                             , relevant_columns=['PortfolioCode', 'PortfolioTypeCode'])
     
 class APXDBvPortfolioBaseInMemoryRepository(InMemorySingletonSQLRepository):
@@ -323,6 +323,16 @@ class CoreDBSFPortfolioLatestInMemoryRepository(InMemorySingletonSQLRepository):
     def __init__(self):
         super().__init__(pk_columns=[PKColumnMapping('PortfolioCode', 'LW_Portfolio_ID__c')], sql_source=CoreDBSFPortfolioLatestView
                             , relevant_columns=['PortfolioCurrencyISOCode', 'StatementGroupCurrencyISOCode', 'Id'])
+
+    def pre_supplement(self, portfolio_code: Union[str,None]=None, trade_date: Union[datetime.date, Tuple[datetime.date, datetime.date], None]=None):
+        # If portfolio_code is a group, refresh for all. Otherwise, refresh for only the portfolio_code
+        if isinstance(portfolio_code, str):
+            if portfolio_code[0] == '@':
+                self.refresh()
+            else:
+                self.refresh(params={'LW_Portfolio_ID__c': portfolio_code})
+        else:
+            self.refresh()
 
     def supplement(self, transaction: Transaction) -> Union[Dict, None]:
         # Also assign the SF Portfolio ID

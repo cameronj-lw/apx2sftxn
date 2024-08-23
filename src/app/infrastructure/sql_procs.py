@@ -1,4 +1,6 @@
 
+# core python
+import datetime
 
 # pypi
 from sqlalchemy import sql
@@ -159,7 +161,8 @@ class APXDBTransactionActivityProcAndFunc(BaseStoredProc):
 
 			# Some columns are datetime, when they actually "should" be a date ... fix this:
 			for col in ('OriginalCostDate', 'SettleDate', 'SettledByDate', 'ThruDate', 'TradeDate'):
-				results[0][col] = pd.to_datetime(results[0][col]).dt.date
+				if isinstance(results[0][col], datetime.datetime):
+					results[0][col] = pd.to_datetime(results[0][col]).dt.date
 
 			return results[0]
 

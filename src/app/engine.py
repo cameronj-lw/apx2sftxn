@@ -56,6 +56,10 @@ def main():
     heartbeat = heartbeat_repo.heartbeat_class(group='LW-Transaction-Engine', name=os.environ.get('APP_NAME'))
     heartbeat_repo.create(heartbeat)
 
+    # Start the engines
+    for engine in engines: 
+        engine.start()
+
     # Loop endlessly processing
     while True:
         for engine in engines:

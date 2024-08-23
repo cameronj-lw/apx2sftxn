@@ -329,16 +329,21 @@ class LWDBAPXAppraisalTable(ScenarioTable):
 		return self.execute_read(stmt)
 
 
-class LWDBSFTransactionTable(BaseTable):
+class LWDBSFTransactionTable(ScenarioTable):
 	config_section = 'lwdb'
 	table_name = 'sf_transaction'
 
-	def read(self, portfolio_code=None, from_date=None, to_date=None, data_handle=None):
+	def read(self, portfolio_code=None, from_date=None, to_date=None, data_handle=None, scenario=None):
 		"""
 		Read all entries, optionally with criteria
 
 		:return: DataFrame
 		"""
+
+		# default to base scenario
+		if scenario is None:
+			scenario = self.base_scenario
+
 		stmt = sql.select(self.table_def)
 		if portfolio_code is not None:
 			stmt = stmt.where(self.c.portfolio_code == portfolio_code)
@@ -348,6 +353,8 @@ class LWDBSFTransactionTable(BaseTable):
 			stmt = stmt.where(self.c.trade_date__c <= to_date) if from_date else stmt.where(self.c.trade_date__c == to_date)
 		if data_handle is not None:
 			stmt = stmt.where(self.c.data_handle == data_handle)
+		if scenario is not None:
+			stmt = stmt.where(self.c.scenario == scenario)
 		return self.execute_read(stmt)
 
 

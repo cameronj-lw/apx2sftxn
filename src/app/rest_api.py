@@ -19,6 +19,7 @@ src_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(src_dir)
 
 # native
+from application.event_handlers import TransactionEventHandler
 from application.query_handlers import (
     LWTransactionSummaryQueryHandler, LWAPX2SFTransactionQueryHandler
 )
@@ -31,7 +32,7 @@ from infrastructure.in_memory_repositories import (
     APXRepDBvPortfolioAndStmtGroupCurrencyInMemoryRepository, CoreDBSFPortfolioLatestInMemoryRepository,
     CoreDBRealizedGainLossInMemoryRepository, APXDBRealizedGainLossInMemoryRepository
 )
-from infrastructure.message_subscribers import KafkaAPXTransactionMessageConsumer
+from infrastructure.message_subscribers import KafkaAPXTransactionMessageConsumer, KafkaAPXSupplementaryDataMessageConsumer
 from infrastructure.sql_repositories import (
     CoreDBTransactionActivityRepository,
     CoreDBRealizedGainLossSupplementaryRepository,
@@ -159,22 +160,22 @@ if __name__ == '__main__':
         # Specify the app's encoder
         app.json_encoder = CustomJSONEncoder
 
-        # Start using waitress
-        # app.run(host=host, port=port, debug=True)
-        logging.info(f'Starting REST API on {host} port {port} with {num_threads} threads...')
-        serve(app, host=host, port=port, threads=num_threads)
-
+        # Start kafka consumer for supplementary data
         if args.kafka_consumer:
-            kafka_consumer = KafkaAPXTransactionMessageConsumer(
-                event_handler = None,
+            kafka_consumer = KafkaAPXSupplementaryDataMessageConsumer(
                 heartbeat_repo = MGMTDBHeartbeatRepository(),
             )
 
             kafka_consumer_thread = threading.Thread(target=kafka_consumer.consume, kwargs={'reset_offset': args.reset_offset})
 
             # Start kafka thread
-            logging.info(f'Starting kafka consumer....')
+            logging.info(f'Starting kafka consumer ({kafka_consumer.cn})....')
             kafka_consumer_thread.start()
+
+        # Start using waitress
+        # app.run(host=host, port=port, debug=True)
+        logging.info(f'Starting REST API on {host} port {port} with {num_threads} threads...')
+        serve(app, host=host, port=port, threads=num_threads)
 
         if args.kafka_consumer:
             kafka_consumer_thread.join()

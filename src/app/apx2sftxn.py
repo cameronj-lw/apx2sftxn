@@ -30,7 +30,12 @@ if __name__ == '__main__':
         parser.add_argument('--from_date', '-fd', type=lambda d: datetime.datetime.strptime(d, '%Y-%m-%d').date())
         parser.add_argument('--to_date', '-td', type=lambda d: datetime.datetime.strptime(d, '%Y-%m-%d').date())
         parser.add_argument('--portfolio_code', '-pc', type=str)
+        parser.add_argument('--calendar_days_back', type=int, help='If from_date is not provided, assign it as this many days before to_date')
         args = parser.parse_args()
+
+        # Derive from_date if not provided, based on calendar_days_back
+        if not args.from_date and args.calendar_days_back:
+            args.from_date = args.to_date - datetime.timedelta(days=args.calendar_days_back)
 
         base_dir = AppConfig().get("logging", "base_dir")
         os.environ['APP_NAME'] = AppConfig().get("app_name", "apx2sftxn")
@@ -43,7 +48,7 @@ if __name__ == '__main__':
 
         # Get transactions from REST API
         params = {k:(v.isoformat() if isinstance(v, (datetime.datetime, datetime.date)) else v) for k, v in args.__dict__.items()}
-        url = f"http://{host}:{port}/api/lw-apx2sftxn?portfolio_code={args.portfolio_code}&from_date={args.from_date.isoformat()}&to_date={args.to_date.isoformat()}"
+        # url = f"http://{host}:{port}/api/lw-apx2sftxn?portfolio_code={args.portfolio_code}&from_date={args.from_date.isoformat()}&to_date={args.to_date.isoformat()}"
         url = f"http://{host}:{port}/api/lw-apx2sftxn"
         logging.info(f'Params: {params}')
         logging.info(f'Getting transaction from URL... {url}')

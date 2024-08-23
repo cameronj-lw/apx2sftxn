@@ -22,7 +22,7 @@ class TransactionEventHandler(EventHandler):
 
     def handle(self, event: Union[TransactionCreatedEvent, TransactionUpdatedEvent, TransactionDeletedEvent
                 , TransactionCommentCreatedEvent, TransactionCommentUpdatedEvent, TransactionCommentDeletedEvent]
-                , stream_data: Union[Dict,None]=None):
+            ):
         try:
             if isinstance(event, TransactionCreatedEvent) or isinstance(event, TransactionUpdatedEvent) or isinstance(event, TransactionDeletedEvent):
                 transaction = event.transaction_after if isinstance(event, TransactionUpdatedEvent) else event.transaction
