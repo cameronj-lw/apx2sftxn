@@ -31,14 +31,14 @@ class TransactionQueryHandler(ABC):
 
     def pre_supplement(self, portfolio_code: Union[str,None]=None, trade_date: Union[datetime.date, Tuple[datetime.date, datetime.date], None]=None):
         for sr in self.preprocessing_supplementary_repos:
-            logging.info(f'Pre-supplementing for {sr.cn}')  # TODO_CLEANUP: performance logging
+            logging.debug(f'[Performance] Pre-supplementing for {sr.cn}')
             sr.pre_supplement(portfolio_code, trade_date)
 
     def preprocessing_supplement(self, transactions: List[Transaction]):
         """ Default supplementing behaviour """
         # Supplement with "pre-processing" supplementary repos, to get additional fields
         for sr in self.preprocessing_supplementary_repos:
-            logging.info(f'Supplementing with {sr.cn}')  # TODO_CLEANUP: performance logging
+            logging.debug(f'[Performance] Supplementing with {sr.cn}')
             for txn in transactions:
                 txn.trade_date_original = txn.TradeDate  # Since for dividends, we may change the TradeDate later
                 if supplemental_data := sr.supplement(txn):
@@ -55,18 +55,18 @@ class TransactionQueryHandler(ABC):
 
     def post_supplement(self, portfolio_code: Union[str,None]=None, trade_date: Union[datetime.date, Tuple[datetime.date, datetime.date], None]=None):
         for sr in self.preprocessing_supplementary_repos:
-            logging.info(f'Post-supplementing for {sr.cn}')  # TODO_CLEANUP: performance logging
+            logging.debug(f'[Performance] Post-supplementing for {sr.cn}')
             sr.post_supplement(portfolio_code, trade_date)
 
     def handle(self, portfolio_code: Union[str,None]=None, trade_date: Union[datetime.date, Tuple[datetime.date, datetime.date], None]=None) -> List[Transaction]:
         source_txns = self.source_txn_repo.get(portfolio_code, trade_date)
-        logging.info(f'{self.cn} got {len(source_txns)} from {self.source_txn_repo.cn}')
+        logging.info(f'{self.cn} got {len(source_txns)} transactions from {self.source_txn_repo.cn}')
         self.pre_supplement(portfolio_code, trade_date)
-        logging.info(f'{self.cn} done pre-supplementing for {portfolio_code}, {trade_date}')  # TODO_CLEANUP: performance logging
+        logging.debug(f'[Performance] {self.cn} done pre-supplementing for {portfolio_code}, {trade_date}')
         self.preprocessing_supplement(source_txns)
-        logging.info(f'{self.cn} supplemented with {len(self.preprocessing_supplementary_repos)} repos')  # TODO_CLEANUP: performance logging
+        logging.debug(f'[Performance] {self.cn} supplemented with {len(self.preprocessing_supplementary_repos)} repos')
         self.post_supplement(portfolio_code, trade_date)
-        logging.info(f'{self.cn} done post-supplementing for {portfolio_code}, {trade_date}')  # TODO_CLEANUP: performance logging
+        logging.debug(f'[Performance] {self.cn} done post-supplementing for {portfolio_code}, {trade_date}')
         return self.process(starting_transactions=source_txns)
 
     @abstractmethod
@@ -906,16 +906,6 @@ class LWAPX2SFTransactionQueryHandler(LWTransactionSummaryQueryHandler):
                 firm_ccy_val = portf_ccy_attr_val * txn.portfolio2firm_fx_rate
                 setattr(txn, f'{attr}Firm', firm_ccy_val)
                 txn.add_lineage(f"Assigned {attr}Firm as {attr} * portfolio2firm_fx_rate = {portf_ccy_attr_val} * {txn.portfolio2firm_fx_rate} = {firm_ccy_val}", source_callable=get_current_callable())
-
-    def assign_trade_amt_cash_flow_firm_ccy_OLD(self, txn: Transaction, portfolio2firm_fx_rate: dict):
-        # TODO_CLEANUP: remove once confirmed not used
-        # apx2sf.pl line 2916-2944: Assign TradeAmount & CashFlow in firm ccy
-        for attr in ('TradeAmount', 'CashFlow'):
-            if portf_ccy_attr_val := getattr(txn, attr, None):
-                firm_ccy_val = portf_ccy_attr_val * portfolio2firm_fx_rate[txn.portfolio_code]
-                setattr(txn, f'{attr}Firm', firm_ccy_val)
-                txn.add_lineage(f"Assigned {attr}Firm as {portf_ccy_attr_val} * {portfolio2firm_fx_rate[txn.portfolio_code]} = {firm_ccy_val}", source_callable=get_current_callable())
-
 
     def process(self, starting_transactions: List[Transaction]) -> List[Transaction]:
         transactions = super().process(starting_transactions)  # most of the logic is taken care of by LW Txn Summary logic

@@ -323,9 +323,6 @@ class LWDBAPXAppraisalTable(ScenarioTable):
 		if ProprietarySymbol is not None:
 			stmt = stmt.where(self.c.ProprietarySymbol == ProprietarySymbol)
 
-		# TODO_CLEANUP: too verbose
-		# print(stmt)
-		# print(stmt.compile(self._database.engine, compile_kwargs={"literal_binds": True}))
 		return self.execute_read(stmt)
 
 

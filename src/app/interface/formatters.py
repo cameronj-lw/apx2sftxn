@@ -26,8 +26,7 @@ class DefaultRESTFormatter:
             'message': message,
             'status': status,
         }, 200)
-        logging.info(f'DefaultRESTFormatter success_get returning {len(data)} data items')  # TODO_CLEANUP: too verbose logging
-        # logging.info(res)
+        logging.debug(f'DefaultRESTFormatter success_get returning {len(data)} data items')
         return res
 
     def get_repo_str(self, repo_classes):

@@ -27,7 +27,7 @@ parser.add_argument('output_format', type=str, help='Specify XML for XML or defa
 
 
 @api.route('/api/lw-transaction-summary')
-class LWTransactionSummary(Resource):
+class LWTransactionSummaryEndpoint(Resource):
     formatter = DefaultRESTFormatter()
 
     def get(self):
@@ -51,15 +51,15 @@ class LWTransactionSummary(Resource):
             query_handler = current_app.config['lw_transaction_summary_query_handler']
 
             # Handle the query
-            logging.info(f'Querying using {query_handler}...')  # TODO_CLEANUP: performance logging
+            logging.debug(f'[Performance] Querying using {query_handler}...')
             transactions = query_handler.handle(portfolio_code=portfolio_code, trade_date=(from_date, to_date))
-            logging.info(f'Got {len(transactions)} from {query_handler}')  # TODO_CLEANUP: performance logging
+            logging.debug(f'[Performance] Got {len(transactions)} from {query_handler}')
 
             # Return standard format
             transactions_list = [t.to_dict() for t in transactions]
-            logging.info(f'Formatted to list of dicts')  # TODO_CLEANUP: performance logging
+            logging.debug(f'[Performance] Formatted to list of dicts')
             res = self.formatter.success_get(transactions_list)
-            logging.info(f'Formatted to REST response format')  # TODO_CLEANUP: performance logging
+            logging.debug(f'[Performance] Formatted to REST response format')
             return res
 
         except Exception as e:
@@ -69,14 +69,14 @@ class LWTransactionSummary(Resource):
 
 
 @api.route('/api/lw-apx2sftxn')
-class LWTransactionSummary(Resource):
+class LWAPX2SFTransactionSummaryEndpoint(Resource):
     formatter = DefaultRESTFormatter()
 
     def get(self):
         try:
             # Parse the arguments
             args = parser.parse_args()
-            logging.info(f'GET args: {args}')
+            logging.info(f'{self.cn} handling GET request with the following args: {args}')
             portfolio_code = args['portfolio_code']
             from_date = datetime.date.fromisoformat(args['from_date'])
             to_date = datetime.date.fromisoformat(args['to_date'])
@@ -94,19 +94,24 @@ class LWTransactionSummary(Resource):
             query_handler = current_app.config['lw_apx2sftxn_query_handler']
 
             # Handle the query
-            logging.info(f'Querying using {query_handler}...')  # TODO_CLEANUP: performance logging
+            logging.debug(f'[Performance] Querying using {query_handler}...')
             transactions = query_handler.handle(portfolio_code=portfolio_code, trade_date=(from_date, to_date))
-            logging.info(f'Got {len(transactions)} from {query_handler}')  # TODO_CLEANUP: performance logging
+            logging.debug(f'[Performance] Got {len(transactions)} from {query_handler}')
 
             # Return standard format
             transactions_list = [t.to_dict() for t in transactions]
-            logging.info(f'Formatted to list of dicts')  # TODO_CLEANUP: performance logging
+            logging.debug(f'[Performance] Formatted to list of dicts')
             res = self.formatter.success_get(transactions_list)
-            logging.info(f'Formatted to REST response format')  # TODO_CLEANUP: performance logging
+            logging.debug(f'[Performance] Formatted to REST response format')
+            logging.info(f'{self.cn} providing response for GET request with the following args: {args}')
             return res
 
         except Exception as e:
             logging.exception(f'Error handling request: {e}')
             logging.exception(traceback.format_exc())
             return self.formatter.exception(e)
+
+    @property
+    def cn(self):  # Class name. Avoids having to print/log type(self).__name__.
+        return type(self).__name__    
 

@@ -256,7 +256,7 @@ class KafkaAPXMessageConsumer(KafkaMessageConsumer):
                                         # TODO_EH: raise exception?
 
                                 # Now refresh the in-memory repo for params
-                                logging.info(f'Refreshing {r.repo_class.__name__} for {params}')  # TODO_CLEANUP: too verbose
+                                logging.info(f'Refreshing {r.repo_class.__name__} for {params}')
                                 r.repo_class().refresh(params)
 
                         except Exception as e:
@@ -469,10 +469,6 @@ class KafkaAPXSupplementaryDataMessageConsumer(KafkaAPXMessageConsumer):
         AppConfig().get('kafka_topics', 'apxdb_securityproperty'): [
             InMemoryDataToRefresh(repo_class=APXRepDBSecurityHashInMemoryRepository, column_mapping=[KafkaToInMemoryColumnMapping('SecurityID')]),
         ],
-        # TODO_CLEANUP: remove below once confirmed not keeping this in-memory to avoid hogging memory since it's date-series
-        # AppConfig().get('kafka_topics', 'apxdb_fxratehistory'): [
-        #     InMemoryDataToRefresh(repo_class=APXDBvFXRateView, column_mapping=[KafkaToInMemoryColumnMapping('NumeratorCurrCode'), KafkaToInMemoryColumnMapping('DenominatorCurrCode'), KafkaToInMemoryColumnMapping('AsOfDate')]),
-        # ],
     }
 
     def __init__(self, heartbeat_repo: Optional[HeartbeatRepository]=None):

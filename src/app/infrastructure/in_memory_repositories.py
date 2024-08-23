@@ -103,7 +103,7 @@ class InMemorySingletonSQLRepository(InMemoryRepository):
 
         pk_col_names = [cm.supplementary_column_name for cm in self.pk_columns]
         new_data = df_to_dict(df=new_data_df, pk_col_names=pk_col_names)
-        logging.debug(f'{self.cn} refreshing for {new_data}')  # TODO_CLEANUP: too verbose
+        logging.debug(f'{self.cn} refreshing for {new_data}')
         self.current_data.update(new_data)
 
 
@@ -265,7 +265,6 @@ class APXDBvFXRateInMemoryRepository(InMemorySingletonSQLRepository):
                 'DenominatorCurrencyCode'   : transaction.ReportingCurrencyCode,
             }   
             get_res = self.get(pk_column_values=pk_column_values)
-            # logging.info(f'{self.cn} supplement get_res: {get_res}')  # TODO_CLEANUP: too verbose
 
             # Assign as spot rate and return
             transaction.portfolio2firm_fx_rate = get_res.get('SpotRate')
@@ -279,9 +278,7 @@ class APXDBvFXRateInMemoryRepository(InMemorySingletonSQLRepository):
     def refresh(self, params: Dict={}):
         """ Avoid refreshing if no criteria are provided """
         if params.get('PriceDate'):
-            # logging.info(f'{self.cn} pre-refresh: {self.current_data}')  # TODO_CLEANUP: too verbose
             super().refresh(params=params)
-            # logging.info(f'{self.cn} post-refresh: {self.current_data}')  # TODO_CLEANUP: too verbose
         else:
             # Since the view contains many FX rates for every day, refreshing without specifying a date is not feasible
             pass  # TODO_EH: any logging or other behaviour desired here?
@@ -289,8 +286,6 @@ class APXDBvFXRateInMemoryRepository(InMemorySingletonSQLRepository):
     def get(self, pk_column_values: Dict[str, Any]) -> dict:
         # First, try to get values from existing in-memory:
         get_res = super().get(pk_column_values=pk_column_values)
-        # logging.info(f'{self.cn} super GET params: {pk_column_values}')  # TODO_CLEANUP: too verbose
-        # logging.info(f'{self.cn} super GET result: {get_res}')  # TODO_CLEANUP: too verbose
         if get_res and len(get_res):
             # If we got data, return it.
             return get_res
